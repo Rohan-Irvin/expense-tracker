@@ -4,6 +4,7 @@ import { runMigrations } from './db/migrations.js';
 import categoriesRouter from './routes/categories.js';
 import accountsRouter from './routes/accounts.js';
 import settingsRouter from './routes/settings.js';
+import importRouter from './routes/import.js';
 
 const app = express();
 const PORT = 3001;
@@ -15,6 +16,7 @@ app.use(express.json());
 app.use('/api/categories', categoriesRouter);
 app.use('/api/accounts', accountsRouter);
 app.use('/api/settings', settingsRouter);
+app.use('/api', importRouter);
 
 async function start() {
   await runMigrations();

@@ -1,0 +1,308 @@
+import db from '../db/connection.js';
+import { categorizeBatch } from './llm.js';
+import type { Category, CategoryWithChildren, Expense } from '../types/index.js';
+
+// ---------------------------------------------------------------------------
+// normalizeDescription — used for merchant rule matching
+// ---------------------------------------------------------------------------
+
+export function normalizeDescription(description: string): string {
+  let normalized = description.toUpperCase();
+  // Strip all digit sequences
+  normalized = normalized.replace(/\d+/g, '');
+  // Strip common Australian state abbreviations at word boundaries
+  normalized = normalized.replace(/\b(?:NSW|VIC|QLD|SA|WA|TAS|NT|ACT)\b/g, '');
+  // Collapse multiple spaces and trim
+  normalized = normalized.replace(/\s+/g, ' ').trim();
+  // Take the first 30 characters
+  return normalized.substring(0, 30);
+}
+
+// ---------------------------------------------------------------------------
+// Helper: fetch full category tree from DB
+// ---------------------------------------------------------------------------
+
+async function fetchCategoryTree(): Promise<CategoryWithChildren[]> {
+  const result = await db.execute('SELECT * FROM categories ORDER BY name');
+  const categories = result.rows as unknown as Category[];
+
+  const topLevel: CategoryWithChildren[] = [];
+  const childMap = new Map<number, Category[]>();
+
+  for (const cat of categories) {
+    if (cat.parent_id === null) {
+      topLevel.push({ ...cat, children: [] });
+    } else {
+      if (!childMap.has(cat.parent_id)) {
+        childMap.set(cat.parent_id, []);
+      }
+      childMap.get(cat.parent_id)!.push(cat);
+    }
+  }
+
+  for (const parent of topLevel) {
+    parent.children = childMap.get(parent.id) || [];
+  }
+
+  return topLevel;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: fetch app settings
+// ---------------------------------------------------------------------------
+
+async function fetchSettings(): Promise<{ lm_studio_base_url: string; lm_studio_model: string; llm_batch_size: number }> {
+  const result = await db.execute('SELECT key, value FROM app_settings');
+  const settings: Record<string, string> = {};
+  for (const row of result.rows) {
+    const r = row as unknown as { key: string; value: string };
+    settings[r.key] = r.value;
+  }
+  return {
+    lm_studio_base_url: settings.lm_studio_base_url || 'http://localhost:1234/v1',
+    lm_studio_model: settings.lm_studio_model || 'qwen3.5-35b-a3b',
+    llm_batch_size: parseInt(settings.llm_batch_size || '20', 10),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// categorizeBatchExpenses — main two-pass pipeline
+// ---------------------------------------------------------------------------
+
+export async function categorizeBatchExpenses(
+  batchId: number,
+  progressCallback?: (done: number, total: number) => void
+): Promise<void> {
+  // 1. Fetch all pending expenses for this batch
+  const pendingResult = await db.execute({
+    sql: `SELECT * FROM expenses WHERE batch_id = ? AND review_status = 'pending'`,
+    args: [batchId],
+  });
+  const allPending = pendingResult.rows as unknown as Expense[];
+
+  if (allPending.length === 0) {
+    return;
+  }
+
+  // 2. Fetch the full category tree
+  const categoryTree = await fetchCategoryTree();
+
+  // 3. Fetch app settings
+  const settings = await fetchSettings();
+
+  const totalExpenses = allPending.length;
+  let doneCount = 0;
+
+  // ------------------------------------------------------------------
+  // Pass 1 — Merchant Rule Matching
+  // ------------------------------------------------------------------
+  const ruleMatchedIds = new Set<number>();
+  const remainingExpenses: Expense[] = [];
+
+  for (const expense of allPending) {
+    const normalized = normalizeDescription(expense.description);
+
+    const ruleResult = await db.execute({
+      sql: `SELECT * FROM merchant_rules WHERE description_pattern = ? LIMIT 1`,
+      args: [normalized],
+    });
+
+    if (ruleResult.rows.length > 0) {
+      const rule = ruleResult.rows[0] as unknown as {
+        id: number;
+        category_id: number;
+        subcategory_id: number | null;
+        description_pattern: string;
+      };
+
+      // Update expense with rule match
+      await db.execute({
+        sql: `UPDATE expenses SET category_id = ?, subcategory_id = ?, review_status = 'approved', updated_at = datetime('now')
+              WHERE id = ?`,
+        args: [rule.category_id, rule.subcategory_id, expense.id],
+      });
+
+      // Insert into llm_suggestions with confidence = 'rule'
+      await db.execute({
+        sql: `INSERT INTO llm_suggestions (expense_id, suggested_category_id, suggested_subcategory_id, confidence, llm_reasoning, model_used, created_at)
+              VALUES (?, ?, ?, 'rule', ?, 'rule-engine', datetime('now'))`,
+        args: [expense.id, rule.category_id, rule.subcategory_id, `Matched merchant rule: ${rule.description_pattern}`],
+      });
+
+      // Update rule match count
+      await db.execute({
+        sql: `UPDATE merchant_rules SET match_count = match_count + 1, last_matched_at = datetime('now') WHERE id = ?`,
+        args: [rule.id],
+      });
+
+      ruleMatchedIds.add(expense.id);
+      doneCount++;
+    } else {
+      remainingExpenses.push(expense);
+    }
+  }
+
+  if (progressCallback) {
+    progressCallback(doneCount, totalExpenses);
+  }
+
+  if (remainingExpenses.length === 0) {
+    return;
+  }
+
+  // ------------------------------------------------------------------
+  // Pass 2 — LLM Categorization
+  // ------------------------------------------------------------------
+
+  // 7. Get few-shot examples
+  const fewShotResult = await db.execute({
+    sql: `SELECT e.description, c1.name as category_name, c2.name as subcategory_name,
+                 e.category_id, e.subcategory_id, e.updated_at
+          FROM expenses e
+          LEFT JOIN categories c1 ON e.category_id = c1.id
+          LEFT JOIN categories c2 ON e.subcategory_id = c2.id
+          WHERE e.review_status = 'approved'
+            AND e.split_parent_id IS NULL
+            AND NOT EXISTS (SELECT 1 FROM llm_suggestions ls WHERE ls.expense_id = e.id AND ls.confidence = 'rule')
+          ORDER BY e.updated_at DESC`,
+    args: [],
+  });
+
+  // Group by category_id+subcategory_id, take max 2 per group, cap at 60 total
+  const fewShotRows = fewShotResult.rows as unknown as {
+    description: string;
+    category_name: string;
+    subcategory_name: string | null;
+    category_id: number;
+    subcategory_id: number | null;
+  }[];
+
+  const groupCounts = new Map<string, number>();
+  const fewShotExamples: { description: string; category_name: string; subcategory_name: string | null }[] = [];
+
+  for (const row of fewShotRows) {
+    if (fewShotExamples.length >= 60) break;
+
+    const groupKey = `${row.category_id}-${row.subcategory_id ?? 'null'}`;
+    const currentCount = groupCounts.get(groupKey) || 0;
+
+    if (currentCount < 2) {
+      fewShotExamples.push({
+        description: row.description,
+        category_name: row.category_name,
+        subcategory_name: row.subcategory_name,
+      });
+      groupCounts.set(groupKey, currentCount + 1);
+    }
+  }
+
+  // 8. Check for Amazon order matches — replace descriptions with product names
+  const remainingIds = remainingExpenses.map((e) => e.id);
+  const placeholders = remainingIds.map(() => '?').join(',');
+
+  let amazonMap = new Map<number, string>();
+  if (remainingIds.length > 0) {
+    const amazonResult = await db.execute({
+      sql: `SELECT ao.matched_expense_id, GROUP_CONCAT(aoi.product_name, ', ') as products
+            FROM amazon_orders ao
+            JOIN amazon_order_items aoi ON aoi.order_id = ao.id
+            WHERE ao.matched_expense_id IN (${placeholders})
+            GROUP BY ao.matched_expense_id`,
+      args: remainingIds,
+    });
+
+    for (const row of amazonResult.rows) {
+      const r = row as unknown as { matched_expense_id: number; products: string };
+      amazonMap.set(r.matched_expense_id, r.products);
+    }
+  }
+
+  // 9. Build expense objects for LLM, applying Amazon overrides
+  const expensesForLlm = remainingExpenses.map((e) => {
+    const amazonProducts = amazonMap.get(e.id);
+    return {
+      id: e.id,
+      date: e.date,
+      description: amazonProducts ? `Amazon order: ${amazonProducts}` : e.description,
+      amount_aud: e.amount_aud,
+    };
+  });
+
+  // Prepare category tree in the format the LLM service expects
+  const treeForLlm = categoryTree.map((cat) => ({
+    id: cat.id,
+    name: cat.name,
+    children: cat.children.map((child) => ({ id: child.id, name: child.name })),
+  }));
+
+  // 10. Split into batches and process
+  const batchSize = settings.llm_batch_size;
+  for (let i = 0; i < expensesForLlm.length; i += batchSize) {
+    const batch = expensesForLlm.slice(i, i + batchSize);
+
+    const results = await categorizeBatch(batch, treeForLlm, fewShotExamples, {
+      baseUrl: settings.lm_studio_base_url,
+      model: settings.lm_studio_model,
+    });
+
+    // 11. For each result, insert suggestion and update expense
+    for (const result of results) {
+      await db.execute({
+        sql: `INSERT INTO llm_suggestions (expense_id, suggested_category_id, suggested_subcategory_id, confidence, llm_reasoning, model_used, created_at)
+              VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`,
+        args: [result.expense_id, result.category_id, result.subcategory_id, result.confidence, result.reasoning, settings.lm_studio_model],
+      });
+
+      // Set category on the expense but keep review_status = 'pending'
+      await db.execute({
+        sql: `UPDATE expenses SET category_id = ?, subcategory_id = ?, updated_at = datetime('now')
+              WHERE id = ?`,
+        args: [result.category_id, result.subcategory_id, result.expense_id],
+      });
+    }
+
+    doneCount += batch.length;
+
+    // 12. Progress callback
+    if (progressCallback) {
+      progressCallback(doneCount, totalExpenses);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// updateMerchantRules — called when a batch is finalized
+// ---------------------------------------------------------------------------
+
+export async function updateMerchantRules(batchId: number): Promise<void> {
+  // Fetch all approved, non-split, non-rule-matched expenses in this batch
+  const result = await db.execute({
+    sql: `SELECT e.* FROM expenses e
+          WHERE e.batch_id = ?
+            AND e.review_status = 'approved'
+            AND e.split_parent_id IS NULL
+            AND NOT EXISTS (SELECT 1 FROM llm_suggestions ls WHERE ls.expense_id = e.id AND ls.confidence = 'rule')`,
+    args: [batchId],
+  });
+
+  const expenses = result.rows as unknown as Expense[];
+
+  for (const expense of expenses) {
+    if (!expense.category_id) continue;
+
+    const pattern = normalizeDescription(expense.description);
+    if (!pattern) continue;
+
+    // Upsert into merchant_rules
+    await db.execute({
+      sql: `INSERT INTO merchant_rules (description_pattern, category_id, subcategory_id, match_count, last_matched_at, created_at)
+            VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))
+            ON CONFLICT(description_pattern) DO UPDATE SET
+              category_id = excluded.category_id,
+              subcategory_id = excluded.subcategory_id,
+              match_count = match_count + 1,
+              last_matched_at = datetime('now')`,
+      args: [pattern, expense.category_id, expense.subcategory_id],
+    });
+  }
+}
