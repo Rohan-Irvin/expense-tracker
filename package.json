@@ -1,0 +1,12 @@
+{
+  "name": "expense-tracker",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "concurrently \"npm run start --prefix server\" \"npm run dev --prefix client\"",
+    "build": "npm run build --prefix client"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
