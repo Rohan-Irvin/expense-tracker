@@ -69,8 +69,35 @@ Return a JSON object with a "results" array containing one entry per expense.`;
       ],
       temperature: 0.6,
       top_p: 0.95,
-      // json_object is universally supported by LM Studio; json_schema is not.
-      response_format: { type: 'json_object' },
+      response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'categorization',
+          strict: true,
+          schema: {
+            type: 'object',
+            properties: {
+              results: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    expense_id: { type: 'integer' },
+                    category_id: { type: 'integer' },
+                    subcategory_id: { type: ['integer', 'null'] },
+                    confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
+                    reasoning: { type: 'string' },
+                  },
+                  required: ['expense_id', 'category_id', 'subcategory_id', 'confidence', 'reasoning'],
+                  additionalProperties: false,
+                },
+              },
+            },
+            required: ['results'],
+            additionalProperties: false,
+          },
+        },
+      } as any,
     });
 
     const content = response.choices[0]?.message?.content;
