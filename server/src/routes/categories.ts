@@ -63,7 +63,7 @@ router.post('/', async (req: Request, res: Response) => {
     }
 
     const result = await db.execute({
-      sql: 'INSERT INTO categories (name, parent_id) VALUES (?, ?) RETURNING *',
+      sql: `INSERT INTO categories (name, parent_id, created_at) VALUES (?, ?, datetime('now')) RETURNING *`,
       args: [name.trim(), parent_id ?? null],
     });
 

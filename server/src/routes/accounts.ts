@@ -38,7 +38,7 @@ router.post('/', async (req: Request, res: Response) => {
     }
 
     const result = await db.execute({
-      sql: 'INSERT INTO accounts (name, currency) VALUES (?, ?) RETURNING *',
+      sql: `INSERT INTO accounts (name, currency, created_at) VALUES (?, ?, datetime('now')) RETURNING *`,
       args: [name.trim(), currency],
     });
 
