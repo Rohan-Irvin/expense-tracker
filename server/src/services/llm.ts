@@ -14,11 +14,14 @@ export async function categorizeBatch(
   fewShotExamples: { description: string; category_name: string; subcategory_name: string | null }[],
   settings: { baseUrl: string; model: string }
 ): Promise<CategorizationResult[]> {
+  // Note: errors from the API call are intentionally NOT caught here — they
+  // propagate up so the SSE handler can report them to the frontend.
+  const client = new OpenAI({
+    baseURL: settings.baseUrl,
+    apiKey: 'lm-studio',
+  });
+
   try {
-    const client = new OpenAI({
-      baseURL: settings.baseUrl,
-      apiKey: 'lm-studio',
-    });
 
     // Build the set of valid category IDs for validation
     const validCategoryIds = new Set<number>();
@@ -66,35 +69,8 @@ Return a JSON object with a "results" array containing one entry per expense.`;
       ],
       temperature: 0.6,
       top_p: 0.95,
-      response_format: {
-        type: 'json_schema',
-        json_schema: {
-          name: 'categorization',
-          strict: true,
-          schema: {
-            type: 'object',
-            properties: {
-              results: {
-                type: 'array',
-                items: {
-                  type: 'object',
-                  properties: {
-                    expense_id: { type: 'integer' },
-                    category_id: { type: 'integer' },
-                    subcategory_id: { type: ['integer', 'null'] },
-                    confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
-                    reasoning: { type: 'string' },
-                  },
-                  required: ['expense_id', 'category_id', 'confidence', 'reasoning'],
-                  additionalProperties: false,
-                },
-              },
-            },
-            required: ['results'],
-            additionalProperties: false,
-          },
-        },
-      },
+      // json_object is universally supported by LM Studio; json_schema is not.
+      response_format: { type: 'json_object' },
     });
 
     const content = response.choices[0]?.message?.content;
@@ -103,7 +79,18 @@ Return a JSON object with a "results" array containing one entry per expense.`;
       return [];
     }
 
-    const parsed = JSON.parse(content) as { results: CategorizationResult[] };
+    let parsed: { results: CategorizationResult[] };
+    try {
+      parsed = JSON.parse(content) as { results: CategorizationResult[] };
+    } catch {
+      console.error('LLM returned non-JSON content:', content.slice(0, 200));
+      return [];
+    }
+
+    if (!Array.isArray(parsed.results)) {
+      console.error('LLM response missing results array:', content.slice(0, 200));
+      return [];
+    }
 
     // Validate each result — only keep entries with valid category IDs
     const validated: CategorizationResult[] = [];
@@ -130,8 +117,10 @@ Return a JSON object with a "results" array containing one entry per expense.`;
     }
 
     return validated;
-  } catch (err) {
-    console.error('LLM categorization error:', err);
-    return [];
+  } catch (err: any) {
+    // Re-throw connection/API errors so the SSE handler can report them to the
+    // frontend. Only swallow JSON-parse errors (handled above).
+    console.error('LLM API error:', err?.message ?? err);
+    throw err;
   }
 }

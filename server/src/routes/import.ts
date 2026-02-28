@@ -133,14 +133,17 @@ router.post('/import/:batchId/categorize', async (req: Request, res: Response) =
 
     res.write(`data: ${JSON.stringify({ done: total, total, complete: true })}\n\n`);
     res.end();
-  } catch (err) {
+  } catch (err: any) {
     console.error('Error during categorization:', err);
-    // If headers already sent, try to write error as SSE
+    const isConnRefused = err?.cause?.code === 'ECONNREFUSED' || err?.code === 'ECONNREFUSED';
+    const message = isConnRefused
+      ? 'Cannot connect to LM Studio. Make sure LM Studio is running with the local server enabled (port 1234).'
+      : (err?.message || 'Categorization failed');
     if (res.headersSent) {
-      res.write(`data: ${JSON.stringify({ error: 'Categorization failed' })}\n\n`);
+      res.write(`data: ${JSON.stringify({ error: message })}\n\n`);
       res.end();
     } else {
-      res.status(500).json({ error: 'Categorization failed' });
+      res.status(500).json({ error: message });
     }
   }
 });
