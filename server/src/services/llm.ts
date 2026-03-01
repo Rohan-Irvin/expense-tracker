@@ -19,6 +19,8 @@ export async function categorizeBatch(
   const client = new OpenAI({
     baseURL: settings.baseUrl,
     apiKey: 'lm-studio',
+    timeout: 30 * 60 * 1000, // 30 minutes — local models can be slow
+    maxRetries: 0,            // Don't retry; let the SSE handler report the error
   });
 
   try {

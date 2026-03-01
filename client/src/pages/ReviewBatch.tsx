@@ -239,7 +239,11 @@ export default function ReviewBatch() {
     setResumeProgress({ done: 0, total: 0 });
 
     try {
-      const response = await fetch(`/api/import/${batchId}/categorize`, {
+      // Go directly to the Express server to bypass the Vite dev proxy.
+      // The proxy drops long-lived SSE connections even with timeout:0 configured.
+      // CORS is enabled on the server (app.use(cors())) so this works in dev.
+      const serverBase = import.meta.env.DEV ? 'http://localhost:3001' : '';
+      const response = await fetch(`${serverBase}/api/import/${batchId}/categorize`, {
         method: 'POST',
         signal: abortController.signal,
       });
@@ -254,6 +258,7 @@ export default function ReviewBatch() {
       const decoder = new TextDecoder();
       let buffer = '';
       let didComplete = false;
+      let serverError: string | null = null;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -270,6 +275,7 @@ export default function ReviewBatch() {
               const event = JSON.parse(trimmed.slice(6));
               setResumeProgress({ done: event.done, total: event.total });
               if (event.error) {
+                serverError = event.error;
                 setResumeError(event.error);
               }
               if (event.complete) {
@@ -282,15 +288,20 @@ export default function ReviewBatch() {
         }
       }
 
-      if (didComplete) {
-        // Reload data to pick up the new suggestions from this run
-        setLoading(true);
-        await loadData();
+      // Always reload — even if incomplete, some batches may have saved to DB.
+      // This ensures the banner shows the true remaining count after any run.
+      setLoading(true);
+      await loadData();
+      if (!didComplete && !serverError) {
+        setResumeError('Categorization ended before completing. Click Resume to continue.');
       }
     } catch (err: any) {
       if (err.name !== 'AbortError') {
         setResumeError(err.message || 'Categorization failed.');
       }
+      // Still reload so the user can see whatever partial progress was saved
+      setLoading(true);
+      await loadData();
     } finally {
       setCategorizingResume(false);
     }
