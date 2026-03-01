@@ -5,82 +5,49 @@ interface Props {
   batchId: number;
 }
 
-interface ProgressEvent {
-  done: number;
-  total: number;
-  complete?: boolean;
-  error?: string;
-}
-
 export default function StepCategorize({ batchId }: Props) {
   const navigate = useNavigate();
-  const [progress, setProgress] = useState<ProgressEvent>({ done: 0, total: 0 });
+  const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [complete, setComplete] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [started, setStarted] = useState(false);
-  const abortRef = useRef<AbortController | null>(null);
+  const cancelledRef = useRef(false);
 
   useEffect(() => {
     if (started) return;
     setStarted(true);
+    cancelledRef.current = false;
 
-    const abortController = new AbortController();
-    abortRef.current = abortController;
-
+    // Use /categorize-next in a loop — one LLM batch per call (~30-120s each).
+    // Much more robust than SSE: each request is a normal short-lived HTTP
+    // roundtrip so proxy/timeout issues don't affect it.
     const run = async () => {
       try {
-        const response = await fetch(`/api/import/${batchId}/categorize`, {
-          method: 'POST',
-          signal: abortController.signal,
-        });
+        // Go directly to Express to avoid Vite proxy for long-running requests.
+        // CORS is enabled globally on the server (app.use(cors())).
+        const serverBase = import.meta.env.DEV ? 'http://localhost:3001' : '';
 
-        if (!response.ok) {
-          const err = await response.json().catch(() => ({ error: response.statusText }));
-          setError(err.error || 'Failed to start categorization.');
-          return;
-        }
+        while (!cancelledRef.current) {
+          const response = await fetch(`${serverBase}/api/import/${batchId}/categorize-next`, {
+            method: 'POST',
+          });
 
-        const reader = response.body!.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
+          if (!response.ok) {
+            const err = await response.json().catch(() => ({ error: response.statusText }));
+            setError(err.error || 'Categorization failed.');
+            return;
+          }
 
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
+          const data: { done: number; total: number; remaining: number } = await response.json();
+          setProgress({ done: data.done, total: data.total });
 
-          buffer += decoder.decode(value, { stream: true });
-
-          // Parse SSE events from buffer
-          const lines = buffer.split('\n');
-          buffer = lines.pop() ?? '';
-
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (trimmed.startsWith('data: ')) {
-              const jsonStr = trimmed.slice(6);
-              try {
-                const event: ProgressEvent = JSON.parse(jsonStr);
-                setProgress({ done: event.done, total: event.total });
-
-                if (event.complete) {
-                  setComplete(true);
-                }
-                if (event.error) {
-                  setError(event.error);
-                }
-              } catch {
-                // Ignore malformed JSON lines
-              }
-            }
+          if (data.remaining === 0) {
+            setComplete(true);
+            return;
           }
         }
-
-        // If stream ended without a complete event, mark as complete
-        if (!complete) {
-          setComplete(true);
-        }
       } catch (err: any) {
-        if (err.name !== 'AbortError') {
+        if (!cancelledRef.current) {
           setError(err.message || 'Categorization failed.');
         }
       }
@@ -89,7 +56,7 @@ export default function StepCategorize({ batchId }: Props) {
     run();
 
     return () => {
-      abortController.abort();
+      cancelledRef.current = true;
     };
   }, [batchId]);
 
@@ -124,6 +91,10 @@ export default function StepCategorize({ batchId }: Props) {
         {error && (
           <div className="bg-red-50 dark:bg-red-950 border border-red-300 dark:border-red-800 rounded-lg p-4">
             <p className="text-sm text-red-800 dark:text-red-200">{error}</p>
+            <p className="text-xs text-red-700 dark:text-red-300 mt-1">
+              {progress.done} of {progress.total} transactions were categorized before the error.
+              You can still review what was completed, then use &ldquo;Resume Categorization&rdquo; on the review page.
+            </p>
           </div>
         )}
 
@@ -137,13 +108,13 @@ export default function StepCategorize({ batchId }: Props) {
           </div>
         )}
 
-        {/* Action button */}
-        {complete && (
+        {/* Action button — shown on complete OR on error (to review partial results) */}
+        {(complete || error) && (
           <button
             onClick={() => navigate(`/import/${batchId}/review`)}
             className="px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90"
           >
-            Review Results
+            {complete ? 'Review Results' : 'Review Partial Results'}
           </button>
         )}
       </div>

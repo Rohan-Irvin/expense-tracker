@@ -34,14 +34,19 @@ export default function ReviewBatch() {
   const [resumeProgress, setResumeProgress] = useState<{ done: number; total: number } | null>(null);
   const [resumeError, setResumeError] = useState<string | null>(null);
 
-  // Load batch data
+  // Load batch data — fetch review data directly from Express (bypasses Vite proxy)
+  // to avoid proxy errors on the large review payload (150KB+).
+  const serverBase = import.meta.env.DEV ? 'http://localhost:3001' : '';
   const loadData = useCallback(async () => {
     if (!batchId) return;
     try {
-      const [reviewData, catData] = await Promise.all([
-        importApi.review(Number(batchId)),
-        categoriesApi.list(),
-      ]);
+      const reviewResponse = await fetch(`${serverBase}/api/import/${batchId}/review`);
+      if (!reviewResponse.ok) {
+        const err = await reviewResponse.json().catch(() => ({ error: reviewResponse.statusText }));
+        throw new Error(err.error || reviewResponse.statusText);
+      }
+      const reviewData = await reviewResponse.json();
+      const catData = await categoriesApi.list();
       setBatch(reviewData.batch);
       setAllExpenses(reviewData.expenses);
       setCategories(catData);
