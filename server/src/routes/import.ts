@@ -3,7 +3,7 @@ import multer from 'multer';
 import db from '../db/connection.js';
 import { parseCsvFile, applyColumnMap } from '../services/csvParser.js';
 import { getExchangeRate } from '../services/exchangeRate.js';
-import { categorizeBatchExpenses, updateMerchantRules } from '../services/categorizer.js';
+import { categorizeBatchExpenses, categorizeNextBatch, updateMerchantRules } from '../services/categorizer.js';
 import type { ColumnMap, Expense, SplitRow } from '../types/index.js';
 
 const router = Router();
@@ -158,6 +158,32 @@ router.post('/import/:batchId/categorize', async (req: Request, res: Response) =
     }
   } finally {
     if (keepaliveInterval) clearInterval(keepaliveInterval);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/import/:batchId/categorize-next — process one LLM batch (REST)
+// ---------------------------------------------------------------------------
+// Unlike the SSE endpoint above, this processes ONE batch per call and returns
+// JSON. The frontend calls it in a loop for resumable categorization.
+// Each request lasts 30-120s — no long-lived connections, no proxy issues.
+// ---------------------------------------------------------------------------
+
+router.post('/import/:batchId/categorize-next', async (req: Request, res: Response) => {
+  try {
+    const batchId = parseInt(req.params.batchId as string, 10);
+    if (isNaN(batchId)) {
+      return res.status(400).json({ error: 'Invalid batchId' });
+    }
+    const result = await categorizeNextBatch(batchId);
+    res.json(result);
+  } catch (err: any) {
+    console.error('Error during categorize-next:', err);
+    const isConnRefused = err?.cause?.code === 'ECONNREFUSED' || err?.code === 'ECONNREFUSED';
+    const message = isConnRefused
+      ? 'Cannot connect to LM Studio. Make sure LM Studio is running with the local server enabled (port 1234).'
+      : (err?.message || 'Categorization failed');
+    res.status(500).json({ error: message });
   }
 });
 

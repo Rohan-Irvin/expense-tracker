@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { importApi, categories as categoriesApi, expenses as expensesApi } from '@/api/client';
 import type { ExpenseWithSuggestion, CategoryWithChildren, ImportBatch, SplitRow } from '@/types';
@@ -33,7 +33,6 @@ export default function ReviewBatch() {
   const [categorizingResume, setCategorizingResume] = useState(false);
   const [resumeProgress, setResumeProgress] = useState<{ done: number; total: number } | null>(null);
   const [resumeError, setResumeError] = useState<string | null>(null);
-  const resumeAbortRef = useRef<AbortController | null>(null);
 
   // Load batch data
   const loadData = useCallback(async () => {
@@ -226,83 +225,42 @@ export default function ReviewBatch() {
     [allExpenses]
   );
 
-  // Resume categorization: re-trigger the SSE categorize endpoint.
-  // The server skips expenses already processed (those with an llm_suggestions row),
-  // so this is safe to call multiple times.
+  // Resume categorization: call /categorize-next in a loop.
+  // Each call processes ONE LLM batch (~20 expenses, 30-120s) and returns JSON.
+  // No long-lived connections, no SSE, no proxy/timeout issues.
   const handleResumeCategorization = useCallback(async () => {
     if (!batchId || categorizingResume) return;
 
-    const abortController = new AbortController();
-    resumeAbortRef.current = abortController;
     setCategorizingResume(true);
     setResumeError(null);
     setResumeProgress({ done: 0, total: 0 });
 
     try {
-      // Go directly to the Express server to bypass the Vite dev proxy.
-      // The proxy drops long-lived SSE connections even with timeout:0 configured.
-      // CORS is enabled on the server (app.use(cors())) so this works in dev.
+      // Go directly to Express to bypass the Vite dev proxy for CORS-enabled local dev.
       const serverBase = import.meta.env.DEV ? 'http://localhost:3001' : '';
-      const response = await fetch(`${serverBase}/api/import/${batchId}/categorize`, {
-        method: 'POST',
-        signal: abortController.signal,
-      });
-
-      if (!response.ok) {
-        const err = await response.json().catch(() => ({ error: response.statusText }));
-        setResumeError(err.error || 'Failed to start categorization.');
-        return;
-      }
-
-      const reader = response.body!.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let didComplete = false;
-      let serverError: string | null = null;
 
       while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+        const response = await fetch(`${serverBase}/api/import/${batchId}/categorize-next`, {
+          method: 'POST',
+        });
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
-
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (trimmed.startsWith('data: ')) {
-            try {
-              const event = JSON.parse(trimmed.slice(6));
-              setResumeProgress({ done: event.done, total: event.total });
-              if (event.error) {
-                serverError = event.error;
-                setResumeError(event.error);
-              }
-              if (event.complete) {
-                didComplete = true;
-              }
-            } catch {
-              // Ignore malformed SSE lines
-            }
-          }
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({ error: response.statusText }));
+          setResumeError(err.error || 'Categorization failed.');
+          break;
         }
-      }
 
-      // Always reload — even if incomplete, some batches may have saved to DB.
-      // This ensures the banner shows the true remaining count after any run.
-      setLoading(true);
-      await loadData();
-      if (!didComplete && !serverError) {
-        setResumeError('Categorization ended before completing. Click Resume to continue.');
+        const data: { done: number; total: number; remaining: number } = await response.json();
+        setResumeProgress({ done: data.done, total: data.total });
+
+        if (data.remaining === 0) break;
       }
     } catch (err: any) {
-      if (err.name !== 'AbortError') {
-        setResumeError(err.message || 'Categorization failed.');
-      }
-      // Still reload so the user can see whatever partial progress was saved
+      setResumeError(err.message || 'Categorization failed.');
+    } finally {
+      // Always reload so the UI reflects actual DB state
       setLoading(true);
       await loadData();
-    } finally {
       setCategorizingResume(false);
     }
   }, [batchId, categorizingResume, loadData]);
