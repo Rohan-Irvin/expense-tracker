@@ -15,6 +15,9 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:3001',
         changeOrigin: true,
+        // Disable timeouts so long-running LLM SSE streams are never dropped
+        timeout: 0,
+        proxyTimeout: 0,
       },
     },
   },

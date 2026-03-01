@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { importApi, categories as categoriesApi, expenses as expensesApi } from '@/api/client';
 import type { ExpenseWithSuggestion, CategoryWithChildren, ImportBatch, SplitRow } from '@/types';
@@ -28,6 +28,12 @@ export default function ReviewBatch() {
   const [bulkActionLoading, setBulkActionLoading] = useState(false);
   const [finalizing, setFinalizing] = useState(false);
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  // Resume categorization state
+  const [categorizingResume, setCategorizingResume] = useState(false);
+  const [resumeProgress, setResumeProgress] = useState<{ done: number; total: number } | null>(null);
+  const [resumeError, setResumeError] = useState<string | null>(null);
+  const resumeAbortRef = useRef<AbortController | null>(null);
 
   // Load batch data
   const loadData = useCallback(async () => {
@@ -214,6 +220,82 @@ export default function ReviewBatch() {
     }
   };
 
+  // Expenses that are pending AND have no LLM/rule suggestion at all — need (re)categorization
+  const uncategorizedPending = useMemo(
+    () => allExpenses.filter((e) => e.review_status === 'pending' && !e.confidence),
+    [allExpenses]
+  );
+
+  // Resume categorization: re-trigger the SSE categorize endpoint.
+  // The server skips expenses already processed (those with an llm_suggestions row),
+  // so this is safe to call multiple times.
+  const handleResumeCategorization = useCallback(async () => {
+    if (!batchId || categorizingResume) return;
+
+    const abortController = new AbortController();
+    resumeAbortRef.current = abortController;
+    setCategorizingResume(true);
+    setResumeError(null);
+    setResumeProgress({ done: 0, total: 0 });
+
+    try {
+      const response = await fetch(`/api/import/${batchId}/categorize`, {
+        method: 'POST',
+        signal: abortController.signal,
+      });
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({ error: response.statusText }));
+        setResumeError(err.error || 'Failed to start categorization.');
+        return;
+      }
+
+      const reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let didComplete = false;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (trimmed.startsWith('data: ')) {
+            try {
+              const event = JSON.parse(trimmed.slice(6));
+              setResumeProgress({ done: event.done, total: event.total });
+              if (event.error) {
+                setResumeError(event.error);
+              }
+              if (event.complete) {
+                didComplete = true;
+              }
+            } catch {
+              // Ignore malformed SSE lines
+            }
+          }
+        }
+      }
+
+      if (didComplete) {
+        // Reload data to pick up the new suggestions from this run
+        setLoading(true);
+        await loadData();
+      }
+    } catch (err: any) {
+      if (err.name !== 'AbortError') {
+        setResumeError(err.message || 'Categorization failed.');
+      }
+    } finally {
+      setCategorizingResume(false);
+    }
+  }, [batchId, categorizingResume, loadData]);
+
   // Finalize
   const handleFinalize = async () => {
     if (!batchId) return;
@@ -365,6 +447,45 @@ export default function ReviewBatch() {
               Cancel
             </button>
           </div>
+        </div>
+      )}
+
+      {/* Resume Categorization banner — shown when uncategorized pending expenses exist */}
+      {uncategorizedPending.length > 0 && !categorizingResume && (
+        <div className="mt-4 p-4 bg-amber-50 dark:bg-amber-950 border border-amber-200 dark:border-amber-800 rounded-lg flex flex-wrap items-center gap-3">
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium text-amber-800 dark:text-amber-200">
+              {uncategorizedPending.length} expense{uncategorizedPending.length !== 1 ? 's' : ''} have not been categorized yet.
+            </p>
+            {resumeError && (
+              <p className="mt-1 text-xs text-red-700 dark:text-red-300">{resumeError}</p>
+            )}
+          </div>
+          <button
+            onClick={handleResumeCategorization}
+            className="shrink-0 px-3 py-1.5 text-sm font-medium bg-amber-600 text-white rounded-md hover:bg-amber-700"
+          >
+            Resume Categorization
+          </button>
+        </div>
+      )}
+
+      {/* Inline categorization progress (while resume is running) */}
+      {categorizingResume && resumeProgress && (
+        <div className="mt-4 p-4 bg-blue-50 dark:bg-blue-950 border border-blue-200 dark:border-blue-800 rounded-lg space-y-2">
+          <p className="text-sm font-medium text-blue-800 dark:text-blue-200">
+            Categorizing… {resumeProgress.done} / {resumeProgress.total}
+            {resumeProgress.total > 0 && ` (${Math.round((resumeProgress.done / resumeProgress.total) * 100)}%)`}
+          </p>
+          <div className="w-full bg-blue-200 dark:bg-blue-800 rounded-full h-2 overflow-hidden">
+            <div
+              className="bg-blue-600 h-2 rounded-full transition-all duration-300 ease-out"
+              style={{ width: `${resumeProgress.total > 0 ? Math.round((resumeProgress.done / resumeProgress.total) * 100) : 0}%` }}
+            />
+          </div>
+          {resumeError && (
+            <p className="text-xs text-red-700 dark:text-red-300">{resumeError}</p>
+          )}
         </div>
       )}
 

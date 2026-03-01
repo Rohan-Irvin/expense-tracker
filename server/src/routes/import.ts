@@ -107,6 +107,8 @@ router.post('/import/confirm', upload.single('file'), async (req: Request, res: 
 // ---------------------------------------------------------------------------
 
 router.post('/import/:batchId/categorize', async (req: Request, res: Response) => {
+  let keepaliveInterval: ReturnType<typeof setInterval> | null = null;
+
   try {
     const batchId = parseInt(req.params.batchId as string, 10);
     if (isNaN(batchId)) {
@@ -118,6 +120,15 @@ router.post('/import/:batchId/categorize', async (req: Request, res: Response) =
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.flushHeaders();
+
+    // Disable socket timeout — LLM batches can take several minutes each
+    req.socket?.setTimeout(0);
+
+    // Send SSE keepalive comment every 15s so the Vite proxy / browser
+    // never considers the connection idle and closes it.
+    keepaliveInterval = setInterval(() => {
+      res.write(': keepalive\n\n');
+    }, 15000);
 
     await categorizeBatchExpenses(batchId, (done, total) => {
       res.write(`data: ${JSON.stringify({ done, total })}\n\n`);
@@ -145,6 +156,8 @@ router.post('/import/:batchId/categorize', async (req: Request, res: Response) =
     } else {
       res.status(500).json({ error: message });
     }
+  } finally {
+    if (keepaliveInterval) clearInterval(keepaliveInterval);
   }
 });
 

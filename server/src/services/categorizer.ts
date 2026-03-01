@@ -84,14 +84,38 @@ export async function categorizeBatchExpenses(
     return;
   }
 
+  const totalExpenses = allPending.length;
+
+  // Check for a prior partial run — expenses that were already LLM-processed
+  // stay 'pending' (awaiting user approval) but already have an llm_suggestions row.
+  // On resume we skip those so they aren't re-sent to the LLM unnecessarily.
+  const pendingIds = allPending.map((e) => e.id);
+  const alreadySuggestedResult = await db.execute({
+    sql: `SELECT DISTINCT expense_id FROM llm_suggestions WHERE expense_id IN (${pendingIds.map(() => '?').join(',')})`,
+    args: pendingIds,
+  });
+  const alreadySuggestedIds = new Set(
+    (alreadySuggestedResult.rows as unknown as { expense_id: number }[]).map((r) => r.expense_id)
+  );
+
+  // Only process expenses that haven't been handled by either pass yet
+  const toProcess = allPending.filter((e) => !alreadySuggestedIds.has(e.id));
+  let doneCount = alreadySuggestedIds.size;
+
+  // Report initial progress so the frontend shows already-completed work on resume
+  if (progressCallback) {
+    progressCallback(doneCount, totalExpenses);
+  }
+
+  if (toProcess.length === 0) {
+    return; // All expenses were processed in a prior run — nothing left to do
+  }
+
   // 2. Fetch the full category tree
   const categoryTree = await fetchCategoryTree();
 
   // 3. Fetch app settings
   const settings = await fetchSettings();
-
-  const totalExpenses = allPending.length;
-  let doneCount = 0;
 
   // ------------------------------------------------------------------
   // Pass 1 — Merchant Rule Matching
@@ -99,7 +123,7 @@ export async function categorizeBatchExpenses(
   const ruleMatchedIds = new Set<number>();
   const remainingExpenses: Expense[] = [];
 
-  for (const expense of allPending) {
+  for (const expense of toProcess) {
     const normalized = normalizeDescription(expense.description);
 
     const ruleResult = await db.execute({
