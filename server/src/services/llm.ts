@@ -12,11 +12,10 @@ export interface CategorizationResult {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Strip HTML tags and return a clean, short error message. */
+/** Return a clean, user-friendly error message from an LLM API error. */
 function cleanLlmError(err: any): string {
   const raw: string = err?.message || String(err) || 'Unknown LLM error';
 
-  // Connection refused → actionable message
   if (
     err?.cause?.code === 'ECONNREFUSED' ||
     err?.code === 'ECONNREFUSED' ||
@@ -25,7 +24,6 @@ function cleanLlmError(err: any): string {
     return 'Cannot connect to LM Studio. Make sure LM Studio is running with the local server enabled.';
   }
 
-  // HTML body in error (LM Studio returned an error page) → actionable message
   if (raw.includes('<!DOCTYPE') || raw.includes('<html') || raw.includes('<HTML')) {
     return (
       'LM Studio returned an error page instead of a valid response. ' +
@@ -37,18 +35,30 @@ function cleanLlmError(err: any): string {
   return raw;
 }
 
-/** Parse a JSON result array out of an LLM text response (handles markdown code fences). */
+/**
+ * Parse the JSON results array out of an LLM text response.
+ * Handles:
+ *  - Markdown code fences (```json ... ```)
+ *  - <think>...</think> blocks (Qwen3 reasoning traces)
+ *  - Leading/trailing prose around the JSON object
+ */
 function parseJsonFromText(text: string): { results: CategorizationResult[] } | null {
-  // Strip markdown code fences if present
   let cleaned = text.trim();
+
+  // Strip <think>...</think> reasoning blocks (Qwen3 models)
+  cleaned = cleaned.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+
+  // Strip markdown code fences
   const fenceMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/);
   if (fenceMatch) {
     cleaned = fenceMatch[1].trim();
   }
+
   // Find the outermost JSON object
   const start = cleaned.indexOf('{');
   const end = cleaned.lastIndexOf('}');
   if (start === -1 || end === -1 || end <= start) return null;
+
   try {
     return JSON.parse(cleaned.slice(start, end + 1)) as { results: CategorizationResult[] };
   } catch {
@@ -69,11 +79,11 @@ export async function categorizeBatch(
   const client = new OpenAI({
     baseURL: settings.baseUrl,
     apiKey: 'lm-studio',
-    timeout: 30 * 60 * 1000, // 30 minutes — local models can be slow
+    timeout: 5 * 60 * 1000, // 5 minutes — surfaces LM Studio hangs quickly
     maxRetries: 0,
   });
 
-  // Build the set of valid category IDs for validation
+  // Build the set of valid category IDs for response validation
   const validCategoryIds = new Set<number>();
   for (const cat of categoryTree) {
     validCategoryIds.add(cat.id);
@@ -82,8 +92,7 @@ export async function categorizeBatch(
     }
   }
 
-  // Build prompts — use a compact flat text list of categories to minimise token count
-  // (much smaller than JSON which has lots of structural overhead)
+  // Compact flat text category list — far fewer tokens than raw JSON
   const categoryList = categoryTree
     .map((cat) => {
       const subs = cat.children.length
@@ -95,13 +104,16 @@ export async function categorizeBatch(
 
   let fewShotSection = '';
   if (fewShotExamples.length > 0) {
-    const exampleLines = fewShotExamples.map((ex) => {
+    const lines = fewShotExamples.map((ex) => {
       const sub = ex.subcategory_name ? ` > ${ex.subcategory_name}` : '';
       return `"${ex.description}" → ${ex.category_name}${sub}`;
     });
-    fewShotSection = `\nExamples:\n${exampleLines.join('\n')}`;
+    fewShotSection = `\nExamples:\n${lines.join('\n')}`;
   }
 
+  // No response_format / json_schema — grammar-constrained decoding causes
+  // LM Studio to hang indefinitely on some models. Plain text + a clear
+  // prompt instruction is more reliable and avoids the hang.
   const systemPrompt = `Categorize expenses. For each, pick the best category (and subcategory if applicable) from the list below. Return ONLY a JSON object with a "results" array — no explanation, no markdown.
 
 Categories:
@@ -110,42 +122,10 @@ ${fewShotSection}
 
 JSON format for each result: {"expense_id":<int>,"category_id":<int>,"subcategory_id":<int|null>,"confidence":"high"|"medium"|"low","reasoning":"<brief>"}`;
 
-
   const userMessage = JSON.stringify(expenses);
-
-  const jsonSchema = {
-    type: 'json_schema' as const,
-    json_schema: {
-      name: 'categorization',
-      strict: true,
-      schema: {
-        type: 'object',
-        properties: {
-          results: {
-            type: 'array',
-            items: {
-              type: 'object',
-              properties: {
-                expense_id: { type: 'integer' },
-                category_id: { type: 'integer' },
-                subcategory_id: { type: ['integer', 'null'] },
-                confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
-                reasoning: { type: 'string' },
-              },
-              required: ['expense_id', 'category_id', 'subcategory_id', 'confidence', 'reasoning'],
-              additionalProperties: false,
-            },
-          },
-        },
-        required: ['results'],
-        additionalProperties: false,
-      },
-    },
-  };
 
   let content: string | null = null;
 
-  // --- Attempt 1: try with json_schema (constrained decoding) ---
   try {
     const response = await client.chat.completions.create({
       model: settings.model,
@@ -155,69 +135,36 @@ JSON format for each result: {"expense_id":<int>,"category_id":<int>,"subcategor
       ],
       temperature: 0.6,
       top_p: 0.95,
-      response_format: jsonSchema as any,
+      // No response_format — avoids grammar-constrained generation hangs
     });
     content = response.choices[0]?.message?.content ?? null;
   } catch (err: any) {
-    // Re-throw immediately for connection errors — no point retrying
-    if (
-      err?.cause?.code === 'ECONNREFUSED' ||
-      err?.code === 'ECONNREFUSED' ||
-      (err?.message || '').includes('ECONNREFUSED')
-    ) {
-      throw new Error(cleanLlmError(err));
-    }
-
-    // For other API errors (json_schema unsupported, model error, etc.)
-    // fall through to Attempt 2 (plain text) instead of giving up.
-    console.warn(
-      '[llm] json_schema attempt failed, falling back to plain text:',
-      cleanLlmError(err).slice(0, 120)
-    );
-  }
-
-  // --- Attempt 2: plain text (no response_format) ---
-  if (content === null) {
-    try {
-      const response = await client.chat.completions.create({
-        model: settings.model,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userMessage },
-        ],
-        temperature: 0.6,
-        top_p: 0.95,
-        // No response_format — rely on the prompt instruction to return JSON
-      });
-      content = response.choices[0]?.message?.content ?? null;
-    } catch (err: any) {
-      // Both attempts failed — throw a clean error
-      throw new Error(cleanLlmError(err));
-    }
+    throw new Error(cleanLlmError(err));
   }
 
   if (!content) {
-    console.error('LLM returned empty content');
+    console.error('[llm] LLM returned empty content');
     return [];
   }
 
-  // Parse JSON from the response
+  console.log('[llm] Raw response length:', content.length, 'chars');
+
   const parsed = parseJsonFromText(content);
   if (!parsed) {
-    console.error('LLM returned non-JSON content:', content.slice(0, 200));
+    console.error('[llm] Failed to parse JSON from response:', content.slice(0, 300));
     return [];
   }
 
   if (!Array.isArray(parsed.results)) {
-    console.error('LLM response missing results array:', content.slice(0, 200));
+    console.error('[llm] Response missing results array:', content.slice(0, 300));
     return [];
   }
 
-  // Validate each result — only keep entries with valid category IDs
+  // Validate — only keep results with IDs that exist in the category tree
   const validated: CategorizationResult[] = [];
   for (const result of parsed.results) {
     if (!validCategoryIds.has(result.category_id)) {
-      console.warn(`Skipping expense ${result.expense_id}: invalid category_id ${result.category_id}`);
+      console.warn(`[llm] Skipping expense ${result.expense_id}: invalid category_id ${result.category_id}`);
       continue;
     }
     if (
@@ -225,9 +172,7 @@ JSON format for each result: {"expense_id":<int>,"category_id":<int>,"subcategor
       result.subcategory_id !== undefined &&
       !validCategoryIds.has(result.subcategory_id)
     ) {
-      console.warn(
-        `Skipping expense ${result.expense_id}: invalid subcategory_id ${result.subcategory_id}`
-      );
+      console.warn(`[llm] Skipping expense ${result.expense_id}: invalid subcategory_id ${result.subcategory_id}`);
       continue;
     }
     validated.push({
@@ -239,5 +184,6 @@ JSON format for each result: {"expense_id":<int>,"category_id":<int>,"subcategor
     });
   }
 
+  console.log(`[llm] Validated ${validated.length}/${parsed.results.length} results`);
   return validated;
 }
