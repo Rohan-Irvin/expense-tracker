@@ -145,11 +145,13 @@ router.post('/import/:batchId/categorize', async (req: Request, res: Response) =
     res.write(`data: ${JSON.stringify({ done: total, total, complete: true })}\n\n`);
     res.end();
   } catch (err: any) {
-    console.error('Error during categorization:', err);
-    const isConnRefused = err?.cause?.code === 'ECONNREFUSED' || err?.code === 'ECONNREFUSED';
-    const message = isConnRefused
-      ? 'Cannot connect to LM Studio. Make sure LM Studio is running with the local server enabled (port 1234).'
-      : (err?.message || 'Categorization failed');
+    console.error('Error during categorization:', err?.message ?? err);
+    let message: string = err?.message || 'Categorization failed';
+    if (message.includes('<!DOCTYPE') || message.includes('<html') || message.includes('<HTML')) {
+      message =
+        'LM Studio returned an error page. Make sure your model is fully loaded in LM Studio, ' +
+        'then try again. You can verify with Settings → Test LLM Connection.';
+    }
     if (res.headersSent) {
       res.write(`data: ${JSON.stringify({ error: message })}\n\n`);
       res.end();
@@ -178,11 +180,14 @@ router.post('/import/:batchId/categorize-next', async (req: Request, res: Respon
     const result = await categorizeNextBatch(batchId);
     res.json(result);
   } catch (err: any) {
-    console.error('Error during categorize-next:', err);
-    const isConnRefused = err?.cause?.code === 'ECONNREFUSED' || err?.code === 'ECONNREFUSED';
-    const message = isConnRefused
-      ? 'Cannot connect to LM Studio. Make sure LM Studio is running with the local server enabled (port 1234).'
-      : (err?.message || 'Categorization failed');
+    console.error('Error during categorize-next:', err?.message ?? err);
+    // llm.ts already cleans up the message; also strip HTML here as a safety net
+    let message: string = err?.message || 'Categorization failed';
+    if (message.includes('<!DOCTYPE') || message.includes('<html') || message.includes('<HTML')) {
+      message =
+        'LM Studio returned an error page. Make sure your model is fully loaded in LM Studio, ' +
+        'then try again. You can verify with Settings → Test LLM Connection.';
+    }
     res.status(500).json({ error: message });
   }
 });
