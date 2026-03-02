@@ -172,6 +172,11 @@ router.post('/import/:batchId/categorize', async (req: Request, res: Response) =
 // ---------------------------------------------------------------------------
 
 router.post('/import/:batchId/categorize-next', async (req: Request, res: Response) => {
+  // Disable socket timeout — LLM calls can take several minutes each.
+  // Without this, Node's default HTTP socket timeout silently closes the
+  // connection mid-wait, which the browser reports as "Failed to fetch".
+  req.socket?.setTimeout(0);
+
   try {
     const batchId = parseInt(req.params.batchId as string, 10);
     if (isNaN(batchId)) {

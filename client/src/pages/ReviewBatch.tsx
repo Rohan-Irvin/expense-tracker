@@ -244,21 +244,39 @@ export default function ReviewBatch() {
       // Go directly to Express to bypass the Vite dev proxy for CORS-enabled local dev.
       const serverBase = import.meta.env.DEV ? 'http://localhost:3001' : '';
 
-      while (true) {
-        const response = await fetch(`${serverBase}/api/import/${batchId}/categorize-next`, {
-          method: 'POST',
-        });
+      // Retry helper: up to 3 attempts for transient network errors ("Failed to fetch").
+      // Server-side state is idempotent so retrying is always safe.
+      const callNext = async (): Promise<{ done: number; total: number; remaining: number } | { error: string }> => {
+        const MAX_ATTEMPTS = 3;
+        let lastErr = '';
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+          try {
+            const response = await fetch(`${serverBase}/api/import/${batchId}/categorize-next`, {
+              method: 'POST',
+            });
+            if (!response.ok) {
+              const body = await response.json().catch(() => ({ error: response.statusText }));
+              return { error: body.error || 'Categorization failed.' };
+            }
+            return await response.json();
+          } catch (err: any) {
+            lastErr = err.message || 'Network error';
+            if (attempt < MAX_ATTEMPTS) {
+              await new Promise((r) => setTimeout(r, attempt * 1000));
+            }
+          }
+        }
+        return { error: lastErr };
+      };
 
-        if (!response.ok) {
-          const err = await response.json().catch(() => ({ error: response.statusText }));
-          setResumeError(err.error || 'Categorization failed.');
+      while (true) {
+        const result = await callNext();
+        if ('error' in result) {
+          setResumeError(result.error);
           break;
         }
-
-        const data: { done: number; total: number; remaining: number } = await response.json();
-        setResumeProgress({ done: data.done, total: data.total });
-
-        if (data.remaining === 0) break;
+        setResumeProgress({ done: result.done, total: result.total });
+        if (result.remaining === 0) break;
       }
     } catch (err: any) {
       setResumeError(err.message || 'Categorization failed.');

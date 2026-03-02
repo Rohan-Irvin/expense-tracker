@@ -22,33 +22,51 @@ export default function StepCategorize({ batchId }: Props) {
     // Much more robust than SSE: each request is a normal short-lived HTTP
     // roundtrip so proxy/timeout issues don't affect it.
     const run = async () => {
-      try {
-        // Go directly to Express to avoid Vite proxy for long-running requests.
-        // CORS is enabled globally on the server (app.use(cors())).
-        const serverBase = import.meta.env.DEV ? 'http://localhost:3001' : '';
+      // Go directly to Express to avoid Vite proxy for long-running requests.
+      // CORS is enabled globally on the server (app.use(cors())).
+      const serverBase = import.meta.env.DEV ? 'http://localhost:3001' : '';
 
-        while (!cancelledRef.current) {
-          const response = await fetch(`${serverBase}/api/import/${batchId}/categorize-next`, {
-            method: 'POST',
-          });
-
-          if (!response.ok) {
-            const err = await response.json().catch(() => ({ error: response.statusText }));
-            setError(err.error || 'Categorization failed.');
-            return;
-          }
-
-          const data: { done: number; total: number; remaining: number } = await response.json();
-          setProgress({ done: data.done, total: data.total });
-
-          if (data.remaining === 0) {
-            setComplete(true);
-            return;
+      // Helper: call categorize-next with up to maxAttempts retries for
+      // transient network errors ("Failed to fetch"). Server-side state is
+      // idempotent so retrying is always safe.
+      const callNext = async (): Promise<{ done: number; total: number; remaining: number } | { error: string }> => {
+        const MAX_ATTEMPTS = 3;
+        let lastErr = '';
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+          try {
+            const response = await fetch(`${serverBase}/api/import/${batchId}/categorize-next`, {
+              method: 'POST',
+            });
+            if (!response.ok) {
+              const body = await response.json().catch(() => ({ error: response.statusText }));
+              return { error: body.error || 'Categorization failed.' };
+            }
+            return await response.json();
+          } catch (err: any) {
+            lastErr = err.message || 'Network error';
+            if (attempt < MAX_ATTEMPTS && !cancelledRef.current) {
+              // Brief pause before retry (1s, 2s)
+              await new Promise((r) => setTimeout(r, attempt * 1000));
+            }
           }
         }
-      } catch (err: any) {
-        if (!cancelledRef.current) {
-          setError(err.message || 'Categorization failed.');
+        return { error: lastErr };
+      };
+
+      while (!cancelledRef.current) {
+        const result = await callNext();
+        if (cancelledRef.current) return;
+
+        if ('error' in result) {
+          setError(result.error);
+          return;
+        }
+
+        setProgress({ done: result.done, total: result.total });
+
+        if (result.remaining === 0) {
+          setComplete(true);
+          return;
         }
       }
     };
