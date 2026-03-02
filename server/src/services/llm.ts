@@ -82,8 +82,16 @@ export async function categorizeBatch(
     }
   }
 
-  // Build prompts
-  const categoryTreeJson = JSON.stringify(categoryTree, null, 2);
+  // Build prompts — use a compact flat text list of categories to minimise token count
+  // (much smaller than JSON which has lots of structural overhead)
+  const categoryList = categoryTree
+    .map((cat) => {
+      const subs = cat.children.length
+        ? ` (subcategories: ${cat.children.map((c) => `${c.name}[id:${c.id}]`).join(', ')})`
+        : '';
+      return `[id:${cat.id}] ${cat.name}${subs}`;
+    })
+    .join('\n');
 
   let fewShotSection = '';
   if (fewShotExamples.length > 0) {
@@ -91,23 +99,17 @@ export async function categorizeBatch(
       const sub = ex.subcategory_name ? ` > ${ex.subcategory_name}` : '';
       return `"${ex.description}" → ${ex.category_name}${sub}`;
     });
-    fewShotSection = `\n\nHere are examples of previously categorized expenses:\n${exampleLines.join('\n')}`;
+    fewShotSection = `\nExamples:\n${exampleLines.join('\n')}`;
   }
 
-  const systemPrompt = `You are an expense categorization assistant. Given a list of expense transactions, assign each one to the most appropriate category and optionally a subcategory from the provided category tree.
+  const systemPrompt = `Categorize expenses. For each, pick the best category (and subcategory if applicable) from the list below. Return ONLY a JSON object with a "results" array — no explanation, no markdown.
 
-Category tree:
-${categoryTreeJson}
+Categories:
+${categoryList}
 ${fewShotSection}
 
-For each expense, return:
-- expense_id: the id of the expense
-- category_id: the id of the best matching top-level category
-- subcategory_id: the id of the best matching subcategory (or null if none fits)
-- confidence: "high", "medium", or "low" based on how certain you are
-- reasoning: a brief explanation of why you chose this category
+JSON format for each result: {"expense_id":<int>,"category_id":<int>,"subcategory_id":<int|null>,"confidence":"high"|"medium"|"low","reasoning":"<brief>"}`;
 
-Return ONLY a valid JSON object with a "results" array containing one entry per expense. No explanation, no markdown, just the JSON object.`;
 
   const userMessage = JSON.stringify(expenses);
 

@@ -61,7 +61,7 @@ async function fetchSettings(): Promise<{ lm_studio_base_url: string; lm_studio_
   return {
     lm_studio_base_url: settings.lm_studio_base_url || 'http://localhost:1234/v1',
     lm_studio_model: settings.lm_studio_model || 'qwen3.5-35b-a3b',
-    llm_batch_size: parseInt(settings.llm_batch_size || '20', 10),
+    llm_batch_size: parseInt(settings.llm_batch_size || '10', 10),
   };
 }
 

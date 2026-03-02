@@ -163,7 +163,12 @@ export async function runMigrations(): Promise<void> {
     INSERT OR IGNORE INTO app_settings (key, value) VALUES ('default_currency', 'AUD')
   `);
   await db.execute(`
-    INSERT OR IGNORE INTO app_settings (key, value) VALUES ('llm_batch_size', '20')
+    INSERT OR IGNORE INTO app_settings (key, value) VALUES ('llm_batch_size', '10')
+  `);
+  // Migrate: if batch size is still at the old default of 20, reduce to 10
+  // (avoids "Context size exceeded" errors on models with small context windows)
+  await db.execute(`
+    UPDATE app_settings SET value = '10' WHERE key = 'llm_batch_size' AND value = '20'
   `);
 
   console.log('Database migrations completed successfully.');
