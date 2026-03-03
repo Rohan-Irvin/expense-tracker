@@ -125,6 +125,7 @@ export interface MerchantRule {
 export interface AppSettings {
   lm_studio_base_url: string;
   lm_studio_model: string;
+  lm_studio_context_length: string;
   default_currency: string;
   llm_batch_size: string;
 }

@@ -6,6 +6,7 @@ export default function Settings() {
   const [form, setForm] = useState<AppSettings>({
     lm_studio_base_url: '',
     lm_studio_model: '',
+    lm_studio_context_length: '20000',
     default_currency: 'AUD',
     llm_batch_size: '10',
   });
@@ -21,6 +22,7 @@ export default function Settings() {
       setForm({
         lm_studio_base_url: data.lm_studio_base_url || '',
         lm_studio_model: data.lm_studio_model || '',
+        lm_studio_context_length: data.lm_studio_context_length || '20000',
         default_currency: data.default_currency || 'AUD',
         llm_batch_size: data.llm_batch_size || '10',
       });
@@ -40,6 +42,7 @@ export default function Settings() {
       await settings.update({
         lm_studio_base_url: form.lm_studio_base_url,
         lm_studio_model: form.lm_studio_model,
+        lm_studio_context_length: form.lm_studio_context_length,
         llm_batch_size: form.llm_batch_size,
       });
       setStatusMessage({ type: 'success', text: 'LLM settings saved successfully.' });
@@ -117,6 +120,21 @@ export default function Settings() {
               placeholder="e.g. qwen2.5-7b-instruct"
               className="w-full px-3 py-2 border border-input rounded-md bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
             />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium mb-1">Context Length</label>
+            <input
+              type="number"
+              value={form.lm_studio_context_length}
+              onChange={(e) => handleChange('lm_studio_context_length', e.target.value)}
+              min="1000"
+              step="1000"
+              className="w-full px-3 py-2 border border-input rounded-md bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+            <p className="text-xs text-muted-foreground mt-1">
+              Maximum tokens the model can process (prompt + response). Sent as <code>context_length</code> to LM Studio.
+            </p>
           </div>
 
           <div>

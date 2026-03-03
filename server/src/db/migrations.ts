@@ -165,6 +165,9 @@ export async function runMigrations(): Promise<void> {
   await db.execute(`
     INSERT OR IGNORE INTO app_settings (key, value) VALUES ('llm_batch_size', '10')
   `);
+  await db.execute(`
+    INSERT OR IGNORE INTO app_settings (key, value) VALUES ('lm_studio_context_length', '20000')
+  `);
   // Migrate: if batch size is still at the old default of 20, reduce to 10
   // (avoids "Context size exceeded" errors on models with small context windows)
   await db.execute(`

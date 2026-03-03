@@ -51,7 +51,7 @@ async function fetchCategoryTree(): Promise<CategoryWithChildren[]> {
 // Helper: fetch app settings
 // ---------------------------------------------------------------------------
 
-async function fetchSettings(): Promise<{ lm_studio_base_url: string; lm_studio_model: string; llm_batch_size: number }> {
+async function fetchSettings(): Promise<{ lm_studio_base_url: string; lm_studio_model: string; llm_batch_size: number; lm_studio_context_length: number }> {
   const result = await db.execute('SELECT key, value FROM app_settings');
   const settings: Record<string, string> = {};
   for (const row of result.rows) {
@@ -62,6 +62,7 @@ async function fetchSettings(): Promise<{ lm_studio_base_url: string; lm_studio_
     lm_studio_base_url: settings.lm_studio_base_url || 'http://localhost:1234/v1',
     lm_studio_model: settings.lm_studio_model || 'qwen3.5-35b-a3b',
     llm_batch_size: parseInt(settings.llm_batch_size || '10', 10),
+    lm_studio_context_length: parseInt(settings.lm_studio_context_length || '20000', 10),
   };
 }
 
@@ -267,6 +268,7 @@ export async function categorizeBatchExpenses(
     const results = await categorizeBatch(batch, treeForLlm, fewShotExamples, {
       baseUrl: settings.lm_studio_base_url,
       model: settings.lm_studio_model,
+      contextLength: settings.lm_studio_context_length,
     });
 
     // 11. For each result, insert suggestion and update expense

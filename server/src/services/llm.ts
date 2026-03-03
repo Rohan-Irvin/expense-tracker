@@ -74,7 +74,7 @@ export async function categorizeBatch(
   expenses: { id: number; date: string; description: string; amount_aud: number }[],
   categoryTree: { id: number; name: string; children: { id: number; name: string }[] }[],
   fewShotExamples: { description: string; category_name: string; subcategory_name: string | null }[],
-  settings: { baseUrl: string; model: string }
+  settings: { baseUrl: string; model: string; contextLength?: number }
 ): Promise<CategorizationResult[]> {
   const client = new OpenAI({
     baseURL: settings.baseUrl,
@@ -136,7 +136,9 @@ JSON format for each result: {"expense_id":<int>,"category_id":<int>,"subcategor
       temperature: 0.6,
       top_p: 0.95,
       // No response_format — avoids grammar-constrained generation hangs
-    });
+      // context_length is a LM Studio extension; ignored by other servers
+      ...(settings.contextLength ? { context_length: settings.contextLength } : {}),
+    } as any);
     content = response.choices[0]?.message?.content ?? null;
   } catch (err: any) {
     throw new Error(cleanLlmError(err));
