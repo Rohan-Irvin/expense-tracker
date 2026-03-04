@@ -2,3 +2,9 @@ node_modules/
 dist/
 server/data/*.db
 .env
+
+# Claude Code — personal settings (API keys, preferences)
+.claude/settings.local.json
+
+# Personal notes
+*.txt

@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "client",
+      "runtimeExecutable": "C:/Program Files/nodejs/node.exe",
+      "runtimeArgs": [".claude/start-client.mjs"],
+      "port": 5173
+    },
+    {
+      "name": "server",
+      "runtimeExecutable": "C:/Program Files/nodejs/node.exe",
+      "runtimeArgs": [".claude/start-server.mjs"],
+      "port": 3001
+    }
+  ]
+}
