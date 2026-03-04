@@ -198,6 +198,102 @@ router.post('/import/:batchId/categorize-next', async (req: Request, res: Respon
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/import/batches/pending — list batches still in pending_review
+// ---------------------------------------------------------------------------
+// IMPORTANT: this route must be defined BEFORE /:batchId/review so that the
+// literal path segment "batches" is not treated as a batchId parameter.
+// ---------------------------------------------------------------------------
+
+router.get('/import/batches/pending', async (req: Request, res: Response) => {
+  try {
+    const result = await db.execute(`
+      SELECT
+        ib.id,
+        ib.filename,
+        ib.imported_at,
+        ib.row_count,
+        a.name  AS account_name,
+        (SELECT COUNT(*) FROM expenses
+          WHERE batch_id = ib.id AND split_parent_id IS NULL
+        ) AS total_expenses,
+        (SELECT COUNT(DISTINCT expense_id) FROM llm_suggestions
+          WHERE expense_id IN (
+            SELECT id FROM expenses WHERE batch_id = ib.id AND split_parent_id IS NULL
+          )
+        ) AS categorized_count,
+        (SELECT COUNT(*) FROM expenses
+          WHERE batch_id = ib.id AND split_parent_id IS NULL AND review_status = 'pending'
+        ) AS pending_count
+      FROM import_batches ib
+      JOIN accounts a ON a.id = ib.account_id
+      WHERE ib.status = 'pending_review'
+      ORDER BY ib.imported_at DESC
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Error fetching pending batches:', err);
+    res.status(500).json({ error: 'Failed to fetch pending batches' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// DELETE /api/import/:batchId — delete a pending_review batch and all its data
+// ---------------------------------------------------------------------------
+
+router.delete('/import/:batchId', async (req: Request, res: Response) => {
+  try {
+    const batchId = parseInt(req.params.batchId as string, 10);
+    if (isNaN(batchId)) {
+      return res.status(400).json({ error: 'Invalid batchId' });
+    }
+
+    // Only allow deleting pending_review batches
+    const batchResult = await db.execute({
+      sql: 'SELECT id, status FROM import_batches WHERE id = ?',
+      args: [batchId],
+    });
+
+    if (batchResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Batch not found' });
+    }
+
+    const batch = batchResult.rows[0] as unknown as { id: number; status: string };
+    if (batch.status !== 'pending_review') {
+      return res.status(400).json({ error: 'Only pending_review batches can be deleted' });
+    }
+
+    // Delete in foreign-key order:
+    // 1. llm_suggestions (references expenses)
+    await db.execute({
+      sql: `DELETE FROM llm_suggestions
+            WHERE expense_id IN (SELECT id FROM expenses WHERE batch_id = ?)`,
+      args: [batchId],
+    });
+    // 2. split children (self-referencing expenses)
+    await db.execute({
+      sql: `DELETE FROM expenses
+            WHERE split_parent_id IN (SELECT id FROM expenses WHERE batch_id = ?)`,
+      args: [batchId],
+    });
+    // 3. all expenses in batch
+    await db.execute({
+      sql: 'DELETE FROM expenses WHERE batch_id = ?',
+      args: [batchId],
+    });
+    // 4. the batch itself
+    await db.execute({
+      sql: 'DELETE FROM import_batches WHERE id = ?',
+      args: [batchId],
+    });
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Error deleting batch:', err);
+    res.status(500).json({ error: 'Failed to delete batch' });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/import/:batchId/review — fetch expenses + suggestions
 // ---------------------------------------------------------------------------
 

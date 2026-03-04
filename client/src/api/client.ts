@@ -55,6 +55,8 @@ export const importApi = {
     uploadFile<any>('/import/confirm', file, { accountId: String(accountId), filename, columnMap: JSON.stringify(columnMap), currency }),
   review: (batchId: number) => request<any>(`/import/${batchId}/review`),
   finalize: (batchId: number) => request<any>(`/import/${batchId}/finalize`, { method: 'POST' }),
+  pendingBatches: () => request<any[]>('/import/batches/pending'),
+  deleteBatch: (batchId: number) => request<any>(`/import/${batchId}`, { method: 'DELETE' }),
 };
 
 // Expenses
