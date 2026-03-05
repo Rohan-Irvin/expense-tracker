@@ -1,7 +1,7 @@
 import { Outlet, NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, Tags, Wallet, Upload, DollarSign,
-  Receipt, Settings, ShoppingCart, BookOpen
+  Receipt, Settings, ShoppingCart, BookOpen, TrendingUp
 } from 'lucide-react';
 
 const navItems = [
@@ -11,6 +11,7 @@ const navItems = [
   { to: '/import', icon: Upload, label: 'Import' },
   { to: '/expenses', icon: Receipt, label: 'Expenses' },
   { to: '/income', icon: DollarSign, label: 'Income' },
+  { to: '/trends', icon: TrendingUp, label: 'Trends' },
   { to: '/amazon', icon: ShoppingCart, label: 'Amazon' },
   { to: '/settings', icon: Settings, label: 'Settings' },
 ];

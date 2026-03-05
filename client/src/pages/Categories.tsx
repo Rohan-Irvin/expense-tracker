@@ -25,13 +25,11 @@ export default function Categories() {
 
   const fetchCategories = async () => {
     try {
-      const data: Category[] = await categories.list();
-      const topLevel = data.filter((c) => c.parent_id === null);
-      const withChildren: CategoryWithChildren[] = topLevel.map((parent) => ({
-        ...parent,
-        children: data.filter((c) => c.parent_id === parent.id),
-      }));
+      // The server already returns top-level categories with children nested inside
+      const withChildren = (await categories.list()) as CategoryWithChildren[];
       setTree(withChildren);
+      // Auto-expand all parents that have children
+      setExpanded(new Set(withChildren.filter((c) => c.children.length > 0).map((c) => c.id)));
     } catch {
       // silently fail — empty state will show
     } finally {
@@ -169,7 +167,9 @@ export default function Categories() {
               )}
             </div>
           ) : (
-            <span className="text-sm">{cat.name}</span>
+            <span className={`text-sm ${isChild ? 'text-muted-foreground' : 'font-medium'}`}>
+              {cat.name}
+            </span>
           )}
         </div>
         {!isEditing && !isConfirmingDelete && (
@@ -236,8 +236,15 @@ export default function Categories() {
                       ) : (
                         <span className="w-5" />
                       )}
-                      <div className="flex-1 min-w-0">
-                        {renderCategory(parent)}
+                      <div className="flex-1 min-w-0 flex items-center gap-2">
+                        <div className="flex-1 min-w-0">
+                          {renderCategory(parent)}
+                        </div>
+                        {hasChildren && (
+                          <span className="text-xs text-muted-foreground bg-muted px-1.5 py-0.5 rounded-full shrink-0">
+                            {parent.children.length}
+                          </span>
+                        )}
                       </div>
                     </div>
 

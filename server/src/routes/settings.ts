@@ -66,12 +66,14 @@ router.post('/test-llm', async (_req: Request, res: Response) => {
       return res.status(400).json({ ok: false, error: 'LM Studio model is not configured' });
     }
 
+    const contextLength = parseInt(settings.lm_studio_context_length || '0', 10);
     const client = new OpenAI({ baseURL: baseUrl, apiKey: 'lm-studio' });
     const response = await client.chat.completions.create({
       model: modelName,
       messages: [{ role: 'user', content: 'Say hello' }],
       max_tokens: 10,
-    });
+      ...(contextLength ? { context_length: contextLength } : {}),
+    } as any);
 
     res.json({ ok: true, model: response.model });
   } catch (err: any) {

@@ -86,7 +86,7 @@ router.get('/summary', async (req: Request, res: Response) => {
     }
 
     // -----------------------------------------------------------------------
-    // Category breakdown for the selected month (use toMonth)
+    // Category breakdown for the FULL selected date range
     // -----------------------------------------------------------------------
     const categoryResult = await db.execute({
       sql: `SELECT e.category_id, c1.name as category_name,
@@ -96,15 +96,18 @@ router.get('/summary', async (req: Request, res: Response) => {
             LEFT JOIN categories c1 ON e.category_id = c1.id
             LEFT JOIN categories c2 ON e.subcategory_id = c2.id
             WHERE e.review_status IN ('approved', 'skipped') AND e.split_parent_id IS NULL
-              AND strftime('%Y-%m', e.date) = ?
+              AND e.date >= ? AND e.date < ?
             GROUP BY e.category_id, e.subcategory_id
             ORDER BY total_aud DESC`,
-      args: [toMonth],
+      args: [dateFrom, dateTo],
     });
 
-    // Get the selected month's income total for percentage calculation
-    const selectedMonthIncome = incomeMap.get(toMonth) ?? 0;
-    const selectedMonthExpenses = expenseMap.get(toMonth) ?? 0;
+    // -----------------------------------------------------------------------
+    // Period totals — sum all months in the trend array
+    // -----------------------------------------------------------------------
+    const periodTotalIncome = monthlyTrend.reduce((sum, m) => sum + m.total_income, 0);
+    const periodTotalExpenses = monthlyTrend.reduce((sum, m) => sum + m.total_expenses, 0);
+    const periodSavings = periodTotalIncome - periodTotalExpenses;
 
     const categoryBreakdown: CategoryBreakdown[] = categoryResult.rows.map((row) => {
       const r = row as unknown as {
@@ -121,27 +124,114 @@ router.get('/summary', async (req: Request, res: Response) => {
         subcategory_id: r.subcategory_id,
         subcategory_name: r.subcategory_name,
         total_aud: Math.round(r.total_aud * 100) / 100,
-        percentage_of_income: selectedMonthIncome > 0
-          ? Math.round((r.total_aud / selectedMonthIncome) * 10000) / 100
+        percentage_of_income: periodTotalIncome > 0
+          ? Math.round((r.total_aud / periodTotalIncome) * 10000) / 100
           : 0,
       };
     });
 
     // -----------------------------------------------------------------------
-    // Assemble response
+    // Assemble response — reuse existing field names for type compatibility
     // -----------------------------------------------------------------------
     const summary: DashboardSummary = {
       monthly_trend: monthlyTrend,
       category_breakdown: categoryBreakdown,
-      selected_month_total_expenses: Math.round(selectedMonthExpenses * 100) / 100,
-      selected_month_total_income: Math.round(selectedMonthIncome * 100) / 100,
-      selected_month_savings: Math.round((selectedMonthIncome - selectedMonthExpenses) * 100) / 100,
+      selected_month_total_expenses: Math.round(periodTotalExpenses * 100) / 100,
+      selected_month_total_income: Math.round(periodTotalIncome * 100) / 100,
+      selected_month_savings: Math.round(periodSavings * 100) / 100,
     };
 
     res.json(summary);
   } catch (err) {
     console.error('Error fetching dashboard summary:', err);
     res.status(500).json({ error: 'Failed to fetch dashboard summary' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/dashboard/trends?from=YYYY-MM&to=YYYY-MM&category_ids=1,2,3
+// Returns monthly totals per category for the selected range
+// ---------------------------------------------------------------------------
+
+router.get('/trends', async (req: Request, res: Response) => {
+  try {
+    const now = new Date();
+    const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+
+    const toMonth = (req.query.to as string) || currentMonth;
+    const fromMonth = (req.query.from as string) || (() => {
+      const d = new Date(toMonth + '-01');
+      d.setMonth(d.getMonth() - 11);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    })();
+
+    const categoryIdsParam = (req.query.category_ids as string) || '';
+    const categoryIds = categoryIdsParam
+      .split(',')
+      .map((s) => parseInt(s.trim(), 10))
+      .filter((n) => !isNaN(n));
+
+    const dateFrom = `${fromMonth}-01`;
+    const toDate = new Date(toMonth + '-01');
+    toDate.setMonth(toDate.getMonth() + 1);
+    const dateTo = `${toDate.getFullYear()}-${String(toDate.getMonth() + 1).padStart(2, '0')}-01`;
+
+    const catWhere = categoryIds.length > 0
+      ? `AND e.category_id IN (${categoryIds.map(() => '?').join(',')})`
+      : '';
+
+    const result = await db.execute({
+      sql: `SELECT strftime('%Y-%m', e.date) as month,
+                   e.category_id,
+                   c.name as category_name,
+                   SUM(e.amount_aud) as total_aud
+            FROM expenses e
+            LEFT JOIN categories c ON e.category_id = c.id
+            WHERE e.review_status IN ('approved', 'skipped')
+              AND e.split_parent_id IS NULL
+              AND e.date >= ? AND e.date < ?
+              AND e.category_id IS NOT NULL
+              ${catWhere}
+            GROUP BY month, e.category_id
+            ORDER BY month, category_name`,
+      args: [dateFrom, dateTo, ...categoryIds],
+    });
+
+    const rows = result.rows as unknown as {
+      month: string;
+      category_id: number;
+      category_name: string;
+      total_aud: number;
+    }[];
+
+    // Build complete months array (fill gaps so chart has every month)
+    const months: string[] = [];
+    const cursor = new Date(fromMonth + '-01');
+    const endDate = new Date(dateTo);
+    while (cursor < endDate) {
+      months.push(`${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, '0')}`);
+      cursor.setMonth(cursor.getMonth() + 1);
+    }
+
+    // Unique categories in result order
+    const catMap = new Map<number, string>();
+    for (const row of rows) {
+      if (!catMap.has(row.category_id)) {
+        catMap.set(row.category_id, row.category_name || 'Unknown');
+      }
+    }
+    const categories = Array.from(catMap.entries()).map(([id, name]) => ({ id, name }));
+
+    const data = rows.map((row) => ({
+      month: row.month,
+      category_id: row.category_id,
+      total_aud: Math.round(row.total_aud * 100) / 100,
+    }));
+
+    res.json({ months, categories, data });
+  } catch (err) {
+    console.error('Error fetching trends data:', err);
+    res.status(500).json({ error: 'Failed to fetch trends data' });
   }
 });
 

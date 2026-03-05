@@ -174,5 +174,10 @@ export async function runMigrations(): Promise<void> {
     UPDATE app_settings SET value = '10' WHERE key = 'llm_batch_size' AND value = '20'
   `);
 
+  // Migration: add category_id to income_entries (idempotent — SQLite ignores duplicate column errors)
+  await db.execute(
+    `ALTER TABLE income_entries ADD COLUMN category_id INTEGER REFERENCES categories(id)`
+  ).catch(() => {}); // Silently ignore if column already exists
+
   console.log('Database migrations completed successfully.');
 }

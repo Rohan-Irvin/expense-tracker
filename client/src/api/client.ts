@@ -9,6 +9,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(err.error || res.statusText);
   }
+  if (res.status === 204) return undefined as T;
   return res.json();
 }
 
@@ -39,6 +40,8 @@ export const categories = {
 export const accounts = {
   list: () => request<any[]>('/accounts'),
   create: (data: { name: string; currency: string }) => request<any>('/accounts', { method: 'POST', body: JSON.stringify(data) }),
+  update: (id: number, data: { name: string }) => request<any>(`/accounts/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  delete: (id: number) => request<void>(`/accounts/${id}`, { method: 'DELETE' }),
 };
 
 // Settings
@@ -70,15 +73,22 @@ export const expenses = {
   skip: (id: number) => request<any>(`/expenses/${id}/skip`, { method: 'PATCH' }),
   split: (id: number, rows: any[]) => request<any>(`/expenses/${id}/split`, { method: 'POST', body: JSON.stringify(rows) }),
   unsplit: (id: number) => request<any>(`/expenses/${id}/unsplit`, { method: 'DELETE' }),
+  update: (id: number, data: { date?: string; description?: string; category_id?: number | null; subcategory_id?: number | null }) =>
+    request<any>(`/expenses/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  updateCategory: (id: number, data: { category_id: number | null; subcategory_id?: number | null }) =>
+    request<any>(`/expenses/${id}/category`, { method: 'PATCH', body: JSON.stringify(data) }),
+  delete: (id: number) => request<void>(`/expenses/${id}`, { method: 'DELETE' }),
 };
 
 // Income
 export const income = {
   list: () => request<any[]>('/income'),
   create: (data: any) => request<any>('/income', { method: 'POST', body: JSON.stringify(data) }),
+  update: (id: number, data: any) => request<any>(`/income/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  delete: (id: number) => request<void>(`/income/${id}`, { method: 'DELETE' }),
   parse: (file: File) => uploadFile<any>('/income/parse', file),
-  confirm: (file: File, columnMap: any, currency: string) =>
-    uploadFile<any>('/income/confirm', file, { columnMap: JSON.stringify(columnMap), currency }),
+  confirm: (file: File, columnMap: any, currency: string, dateFormat: string) =>
+    uploadFile<any>('/income/confirm', file, { columnMap: JSON.stringify(columnMap), currency, dateFormat }),
 };
 
 // Dashboard
@@ -88,6 +98,13 @@ export const dashboard = {
     if (from) params.set('from', from);
     if (to) params.set('to', to);
     return request<any>(`/dashboard/summary?${params.toString()}`);
+  },
+  trends: (from: string, to: string, categoryIds?: number[]) => {
+    const params = new URLSearchParams();
+    params.set('from', from);
+    params.set('to', to);
+    if (categoryIds && categoryIds.length > 0) params.set('category_ids', categoryIds.join(','));
+    return request<any>(`/dashboard/trends?${params.toString()}`);
   },
 };
 

@@ -5,7 +5,7 @@ import type { ExpenseWithSuggestion, CategoryWithChildren, ImportBatch, SplitRow
 import ExpenseCard from '@/components/ExpenseCard';
 import SplitDialog from '@/components/SplitDialog';
 
-type FilterType = 'all' | 'pending' | 'approved' | 'skipped';
+type FilterType = 'all' | 'pending' | 'approved';
 
 const PAGE_SIZE = 20;
 
@@ -28,6 +28,8 @@ export default function ReviewBatch() {
   const [bulkActionLoading, setBulkActionLoading] = useState(false);
   const [finalizing, setFinalizing] = useState(false);
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  // IDs currently animating out before being removed from the pending view
+  const [removingIds, setRemovingIds] = useState<Set<number>>(new Set());
 
   // Resume categorization state
   const [categorizingResume, setCategorizingResume] = useState(false);
@@ -67,18 +69,22 @@ export default function ReviewBatch() {
     const pending = allExpenses.filter((e) => e.review_status === 'pending').length;
     const approvedRule = allExpenses.filter((e) => e.review_status === 'approved' && e.confidence === 'rule').length;
     const approvedOther = allExpenses.filter((e) => e.review_status === 'approved' && e.confidence !== 'rule').length;
-    const skipped = allExpenses.filter((e) => e.review_status === 'skipped').length;
     const split = allExpenses.filter((e) => e.review_status === 'split').length;
-    return { pending, approvedRule, approvedOther, skipped, split };
+    return { pending, approvedRule, approvedOther, split };
   }, [allExpenses]);
 
-  // Filtered expenses
+  // Filtered + sorted expenses — categorized (have a suggestion) before uncategorized
   const filteredExpenses = useMemo(() => {
-    if (filter === 'all') return allExpenses;
-    if (filter === 'pending') return allExpenses.filter((e) => e.review_status === 'pending');
-    if (filter === 'approved') return allExpenses.filter((e) => e.review_status === 'approved' || e.review_status === 'split');
-    if (filter === 'skipped') return allExpenses.filter((e) => e.review_status === 'skipped');
-    return allExpenses;
+    let list = allExpenses;
+    if (filter === 'pending') list = allExpenses.filter((e) => e.review_status === 'pending');
+    else if (filter === 'approved') list = allExpenses.filter((e) => e.review_status === 'approved' || e.review_status === 'split');
+
+    // Stable sort: categorized first (confidence !== null), then uncategorized
+    return [...list].sort((a, b) => {
+      const aCat = a.confidence !== null ? 0 : 1;
+      const bCat = b.confidence !== null ? 0 : 1;
+      return aCat - bCat;
+    });
   }, [allExpenses, filter]);
 
   // Pagination
@@ -100,15 +106,34 @@ export default function ReviewBatch() {
     }
   }, [page, totalPages]);
 
+  // Helper: animate a card out, then update state after transition completes
+  const animateThenUpdate = useCallback((id: number, updateFn: () => void) => {
+    if (filter === 'pending') {
+      setRemovingIds((prev) => new Set(prev).add(id));
+      setTimeout(() => {
+        updateFn();
+        setRemovingIds((prev) => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+      }, 280);
+    } else {
+      updateFn();
+    }
+  }, [filter]);
+
   // Actions
   const handleApprove = async (id: number, categoryId: number, subcategoryId?: number) => {
     try {
       await expensesApi.approve(id, { category_id: categoryId, subcategory_id: subcategoryId });
-      setAllExpenses((prev) =>
-        prev.map((e) =>
-          e.id === id
-            ? { ...e, review_status: 'approved' as const, category_id: categoryId, subcategory_id: subcategoryId ?? null }
-            : e
+      animateThenUpdate(id, () =>
+        setAllExpenses((prev) =>
+          prev.map((e) =>
+            e.id === id
+              ? { ...e, review_status: 'approved' as const, category_id: categoryId, subcategory_id: subcategoryId ?? null }
+              : e
+          )
         )
       );
     } catch (err: any) {
@@ -116,16 +141,14 @@ export default function ReviewBatch() {
     }
   };
 
-  const handleSkip = async (id: number) => {
+  const handleDelete = async (id: number) => {
     try {
-      await expensesApi.skip(id);
-      setAllExpenses((prev) =>
-        prev.map((e) =>
-          e.id === id ? { ...e, review_status: 'skipped' as const } : e
-        )
+      await expensesApi.delete(id);
+      animateThenUpdate(id, () =>
+        setAllExpenses((prev) => prev.filter((e) => e.id !== id))
       );
     } catch (err: any) {
-      setStatusMessage({ type: 'error', text: `Failed to skip: ${err.message}` });
+      setStatusMessage({ type: 'error', text: `Failed to delete: ${err.message}` });
     }
   };
 
@@ -288,6 +311,19 @@ export default function ReviewBatch() {
     }
   }, [batchId, categorizingResume, loadData]);
 
+  // When a new category is created inside an ExpenseCard, update the shared categories list
+  const handleCategoryCreated = useCallback((newCat: CategoryWithChildren) => {
+    setCategories((prev) => {
+      const exists = prev.find((c) => c.id === newCat.id);
+      if (exists) {
+        // Existing parent updated with a new child — replace the entry
+        return prev.map((c) => (c.id === newCat.id ? newCat : c));
+      }
+      // Brand-new top-level category
+      return [...prev, newCat];
+    });
+  }, []);
+
   // Finalize
   const handleFinalize = async () => {
     if (!batchId) return;
@@ -390,9 +426,6 @@ export default function ReviewBatch() {
         <span className="inline-flex items-center px-3 py-1 text-xs font-medium rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
           {counts.approvedOther} Approved (LLM/User)
         </span>
-        <span className="inline-flex items-center px-3 py-1 text-xs font-medium rounded-full bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400">
-          {counts.skipped} Skipped
-        </span>
         {counts.split > 0 && (
           <span className="inline-flex items-center px-3 py-1 text-xs font-medium rounded-full bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200">
             {counts.split} Split
@@ -483,7 +516,7 @@ export default function ReviewBatch() {
 
       {/* Filter bar */}
       <div className="flex gap-1 mt-4 bg-muted rounded-lg p-1">
-        {(['all', 'pending', 'approved', 'skipped'] as FilterType[]).map((f) => (
+        {(['all', 'pending', 'approved'] as FilterType[]).map((f) => (
           <button
             key={f}
             onClick={() => setFilter(f)}
@@ -499,9 +532,7 @@ export default function ReviewBatch() {
                 ? allExpenses.length
                 : f === 'pending'
                   ? counts.pending
-                  : f === 'approved'
-                    ? counts.approvedRule + counts.approvedOther + counts.split
-                    : counts.skipped})
+                  : counts.approvedRule + counts.approvedOther + counts.split})
             </span>
           </button>
         ))}
@@ -515,14 +546,23 @@ export default function ReviewBatch() {
           </p>
         ) : (
           paginatedExpenses.map((expense) => (
-            <ExpenseCard
+            <div
               key={expense.id}
-              expense={expense}
-              categories={categories}
-              onApprove={handleApprove}
-              onSkip={handleSkip}
-              onSplit={handleSplitOpen}
-            />
+              className={`transition-all duration-300 ease-out overflow-hidden ${
+                removingIds.has(expense.id)
+                  ? 'opacity-0 -translate-y-1 max-h-0'
+                  : 'opacity-100 translate-y-0 max-h-[600px]'
+              }`}
+            >
+              <ExpenseCard
+                expense={expense}
+                categories={categories}
+                onApprove={handleApprove}
+                onDelete={handleDelete}
+                onSplit={handleSplitOpen}
+                onCategoryCreated={handleCategoryCreated}
+              />
+            </div>
           ))
         )}
       </div>

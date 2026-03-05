@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
-import { expenses, categories as categoriesApi, accounts as accountsApi } from '@/api/client';
+import { expenses as expensesApi, categories as categoriesApi, accounts as accountsApi } from '@/api/client';
 import type { Expense, CategoryWithChildren, Account } from '@/types';
 
 interface ExpenseWithNames extends Expense {
@@ -22,16 +22,25 @@ const STATUS_OPTIONS = [
   { value: 'skipped', label: 'Skipped' },
 ];
 
-function getCurrentMonth(): string {
+function getDefaultDateRange(): { from: string; to: string } {
   const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  return `${year}-${month}`;
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  return { from: `${y}-${m}-01`, to: `${y}-${m}-${d}` };
+}
+
+// Add one day to a YYYY-MM-DD string (for inclusive date_to on the server)
+function nextDay(dateStr: string): string {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dt = new Date(y, m - 1, d + 1);
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
 }
 
 function formatDate(dateStr: string): string {
-  const d = new Date(dateStr);
-  return d.toLocaleDateString('en-AU', { day: '2-digit', month: 'short', year: 'numeric' });
+  const [y, m, d] = dateStr.split('-');
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  return `${d} ${months[parseInt(m, 10) - 1]} ${y}`;
 }
 
 function formatCurrency(amount: number): string {
@@ -58,9 +67,9 @@ function truncate(text: string, maxLen: number): string {
 function statusBadge(status: Expense['review_status']) {
   const styles: Record<string, string> = {
     approved: 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200',
-    pending: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200',
-    skipped: 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400',
-    split: 'bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200',
+    pending:  'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200',
+    skipped:  'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400',
+    split:    'bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200',
   };
   return (
     <span className={`inline-flex items-center px-2 py-0.5 text-xs font-medium rounded-full ${styles[status] || ''}`}>
@@ -69,82 +78,99 @@ function statusBadge(status: Expense['review_status']) {
   );
 }
 
+const LIMIT = 50;
+
 export default function Expenses() {
-  // Filter state
-  const [month, setMonth] = useState(getCurrentMonth);
+  const defaults = getDefaultDateRange();
+
+  // ── Filter state ──────────────────────────────────────────────────────────
+  const [dateFrom, setDateFrom] = useState(defaults.from);
+  const [dateTo,   setDateTo]   = useState(defaults.to);
   const [categoryId, setCategoryId] = useState('');
-  const [accountId, setAccountId] = useState('');
-  const [status, setStatus] = useState('');
+  const [accountId,  setAccountId]  = useState('');
+  const [status,     setStatus]     = useState('');
   const [page, setPage] = useState(1);
-  const [limit] = useState(50);
 
-  // Data state
-  const [data, setData] = useState<ExpensesResponse | null>(null);
+  // ── Remote data ───────────────────────────────────────────────────────────
+  const [data,           setData]           = useState<ExpensesResponse | null>(null);
   const [categoriesList, setCategoriesList] = useState<CategoryWithChildren[]>([]);
-  const [accountsList, setAccountsList] = useState<Account[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [accountsList,   setAccountsList]   = useState<Account[]>([]);
+  const [loading,  setLoading]  = useState(true);
+  const [error,    setError]    = useState<string | null>(null);
 
-  // Load categories and accounts once
+  // ── Selection ─────────────────────────────────────────────────────────────
+  const [selectedIds,       setSelectedIds]       = useState<Set<number>>(new Set());
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
+  const [bulkDeleting,      setBulkDeleting]      = useState(false);
+
+  // ── Inline edit ───────────────────────────────────────────────────────────
+  const [editingId,      setEditingId]      = useState<number | null>(null);
+  const [editDate,       setEditDate]       = useState('');
+  const [editDesc,       setEditDesc]       = useState('');
+  const [editCatId,      setEditCatId]      = useState<number>(0);
+  const [editSubcatId,   setEditSubcatId]   = useState<number>(0);
+  const [editSaving,     setEditSaving]     = useState(false);
+
+  // ── Per-row delete confirm ────────────────────────────────────────────────
+  const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
+
+  // ── Load reference data once ──────────────────────────────────────────────
   useEffect(() => {
     Promise.all([categoriesApi.list(), accountsApi.list()])
-      .then(([catData, accData]) => {
-        // Build category tree: parent categories with children
-        const allCats = catData as any[];
-        const topLevel = allCats.filter((c: any) => c.parent_id === null);
-        const withChildren: CategoryWithChildren[] = topLevel.map((parent: any) => ({
-          ...parent,
-          children: allCats.filter((c: any) => c.parent_id === parent.id),
-        }));
-        setCategoriesList(withChildren);
-        setAccountsList(accData as Account[]);
+      .then(([cats, accs]) => {
+        setCategoriesList(cats as CategoryWithChildren[]);
+        setAccountsList(accs as Account[]);
       })
-      .catch(() => {
-        // Non-blocking: filters will just show empty dropdowns
-      });
+      .catch(() => {});
   }, []);
 
-  // Fetch expenses whenever filters or page changes
+  // ── Fetch expenses ────────────────────────────────────────────────────────
   const fetchExpenses = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
       const params: Record<string, string> = {
         page: String(page),
-        limit: String(limit),
+        limit: String(LIMIT),
       };
-      if (month) params.month = month;
+      if (dateFrom) params.date_from = dateFrom;
+      if (dateTo)   params.date_to   = nextDay(dateTo); // exclusive upper bound
       if (categoryId) params.category_id = categoryId;
-      if (accountId) params.account_id = accountId;
-      if (status) params.status = status;
+      if (accountId)  params.account_id  = accountId;
+      if (status)     params.status      = status;
 
-      const result = await expenses.list(params) as ExpensesResponse;
+      const result = await expensesApi.list(params) as ExpensesResponse;
       setData(result);
     } catch (err: any) {
       setError(err.message || 'Failed to load expenses.');
     } finally {
       setLoading(false);
     }
-  }, [month, categoryId, accountId, status, page, limit]);
+  }, [dateFrom, dateTo, categoryId, accountId, status, page]);
 
+  useEffect(() => { fetchExpenses(); }, [fetchExpenses]);
+
+  // Reset page to 1 when any filter changes
+  useEffect(() => { setPage(1); }, [dateFrom, dateTo, categoryId, accountId, status]);
+
+  // Clear selection when page changes
   useEffect(() => {
-    fetchExpenses();
-  }, [fetchExpenses]);
+    setSelectedIds(new Set());
+    setConfirmBulkDelete(false);
+  }, [page]);
 
-  // Reset to page 1 when filters change
-  useEffect(() => {
-    setPage(1);
-  }, [month, categoryId, accountId, status]);
+  // ── Derived values ────────────────────────────────────────────────────────
+  const totalPages    = data?.totalPages ?? 1;
+  const total         = data?.total ?? 0;
+  const expensesList  = data?.expenses ?? [];
+  const rangeStart    = expensesList.length > 0 ? (page - 1) * LIMIT + 1 : 0;
+  const rangeEnd      = expensesList.length > 0 ? rangeStart + expensesList.length - 1 : 0;
 
-  // Compute pagination display
-  const totalPages = data?.totalPages ?? 1;
-  const total = data?.total ?? 0;
-  const expensesList = data?.expenses ?? [];
+  const visibleTotal = useMemo(
+    () => expensesList.reduce((s, e) => s + e.amount_aud, 0),
+    [expensesList]
+  );
 
-  const rangeStart = expensesList.length > 0 ? (page - 1) * limit + 1 : 0;
-  const rangeEnd = expensesList.length > 0 ? rangeStart + expensesList.length - 1 : 0;
-
-  // Build page numbers with ellipsis
   const pageNumbers = useMemo(() => {
     const pages: (number | 'ellipsis')[] = [];
     if (totalPages <= 7) {
@@ -153,7 +179,7 @@ export default function Expenses() {
       pages.push(1);
       if (page > 3) pages.push('ellipsis');
       const start = Math.max(2, page - 1);
-      const end = Math.min(totalPages - 1, page + 1);
+      const end   = Math.min(totalPages - 1, page + 1);
       for (let i = start; i <= end; i++) pages.push(i);
       if (page < totalPages - 2) pages.push('ellipsis');
       pages.push(totalPages);
@@ -161,11 +187,91 @@ export default function Expenses() {
     return pages;
   }, [page, totalPages]);
 
-  // Compute total AUD sum from visible expenses
-  const visibleTotal = useMemo(() => {
-    return expensesList.reduce((sum, e) => sum + e.amount_aud, 0);
-  }, [expensesList]);
+  const editSubcatOptions = useMemo(
+    () => categoriesList.find((c) => c.id === editCatId)?.children ?? [],
+    [editCatId, categoriesList]
+  );
 
+  const allCurrentPageSelected =
+    expensesList.length > 0 && expensesList.every((e) => selectedIds.has(e.id));
+
+  // ── Handlers ──────────────────────────────────────────────────────────────
+  const toggleSelectAll = () => {
+    if (allCurrentPageSelected) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(expensesList.map((e) => e.id)));
+    }
+    setConfirmBulkDelete(false);
+  };
+
+  const toggleSelect = (id: number) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+    setConfirmBulkDelete(false);
+  };
+
+  const startEdit = (expense: ExpenseWithNames) => {
+    setEditingId(expense.id);
+    setEditDate(expense.date);
+    setEditDesc(expense.description);
+    setEditCatId(expense.category_id ?? 0);
+    setEditSubcatId(expense.subcategory_id ?? 0);
+    setConfirmDeleteId(null);
+  };
+
+  const cancelEdit = () => { setEditingId(null); setEditSaving(false); };
+
+  const saveEdit = async () => {
+    if (!editingId) return;
+    setEditSaving(true);
+    try {
+      await expensesApi.update(editingId, {
+        date:          editDate,
+        description:   editDesc,
+        category_id:   editCatId    || null,
+        subcategory_id: editSubcatId || null,
+      });
+      setEditingId(null);
+      await fetchExpenses();
+    } catch (err: any) {
+      alert(err.message);
+    } finally {
+      setEditSaving(false);
+    }
+  };
+
+  const handleDelete = async (id: number) => {
+    if (confirmDeleteId !== id) { setConfirmDeleteId(id); return; }
+    try {
+      await expensesApi.delete(id);
+      setConfirmDeleteId(null);
+      setSelectedIds((prev) => { const n = new Set(prev); n.delete(id); return n; });
+      await fetchExpenses();
+    } catch (err: any) {
+      alert(err.message);
+    }
+  };
+
+  const handleBulkDelete = async () => {
+    if (!confirmBulkDelete) { setConfirmBulkDelete(true); return; }
+    setBulkDeleting(true);
+    try {
+      await Promise.all([...selectedIds].map((id) => expensesApi.delete(id)));
+      setSelectedIds(new Set());
+      setConfirmBulkDelete(false);
+      await fetchExpenses();
+    } catch (err: any) {
+      alert(err.message);
+    } finally {
+      setBulkDeleting(false);
+    }
+  };
+
+  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div>
       {/* Header */}
@@ -173,23 +279,31 @@ export default function Expenses() {
         <div>
           <h1 className="text-2xl font-bold">Expenses</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            {total} total expense{total !== 1 ? 's' : ''} found
+            {total} expense{total !== 1 ? 's' : ''} found
           </p>
         </div>
       </div>
 
-      {/* Filters bar */}
+      {/* Filters */}
       <div className="flex flex-wrap items-end gap-3 mt-6">
         <div>
-          <label className="block text-xs font-medium text-muted-foreground mb-1">Month</label>
+          <label className="block text-xs font-medium text-muted-foreground mb-1">From</label>
           <input
-            type="month"
-            value={month}
-            onChange={(e) => setMonth(e.target.value)}
+            type="date"
+            value={dateFrom}
+            onChange={(e) => setDateFrom(e.target.value)}
             className="px-3 py-2 border border-input rounded-md bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring"
           />
         </div>
-
+        <div>
+          <label className="block text-xs font-medium text-muted-foreground mb-1">To</label>
+          <input
+            type="date"
+            value={dateTo}
+            onChange={(e) => setDateTo(e.target.value)}
+            className="px-3 py-2 border border-input rounded-md bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+          />
+        </div>
         <div>
           <label className="block text-xs font-medium text-muted-foreground mb-1">Category</label>
           <select
@@ -199,13 +313,10 @@ export default function Expenses() {
           >
             <option value="">All Categories</option>
             {categoriesList.map((cat) => (
-              <option key={cat.id} value={cat.id}>
-                {cat.name}
-              </option>
+              <option key={cat.id} value={cat.id}>{cat.name}</option>
             ))}
           </select>
         </div>
-
         <div>
           <label className="block text-xs font-medium text-muted-foreground mb-1">Account</label>
           <select
@@ -215,13 +326,10 @@ export default function Expenses() {
           >
             <option value="">All Accounts</option>
             {accountsList.map((acc) => (
-              <option key={acc.id} value={acc.id}>
-                {acc.name} ({acc.currency})
-              </option>
+              <option key={acc.id} value={acc.id}>{acc.name} ({acc.currency})</option>
             ))}
           </select>
         </div>
-
         <div>
           <label className="block text-xs font-medium text-muted-foreground mb-1">Status</label>
           <select
@@ -230,48 +338,80 @@ export default function Expenses() {
             className="px-3 py-2 border border-input rounded-md bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring"
           >
             {STATUS_OPTIONS.map((opt) => (
-              <option key={opt.value} value={opt.value}>
-                {opt.label}
-              </option>
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
             ))}
           </select>
         </div>
       </div>
 
-      {/* Summary row */}
-      <div className="flex items-center gap-6 mt-4 py-3 px-4 bg-muted/50 rounded-lg text-sm">
-        <div>
-          <span className="text-muted-foreground">Showing:</span>{' '}
-          <span className="font-medium">{expensesList.length} expense{expensesList.length !== 1 ? 's' : ''}</span>
-          {total > limit && (
-            <span className="text-muted-foreground"> of {total}</span>
-          )}
-        </div>
-        <div>
-          <span className="text-muted-foreground">Page total:</span>{' '}
-          <span className="font-medium text-red-600 dark:text-red-400">{formatCurrency(visibleTotal)}</span>
-        </div>
+      {/* Summary bar / bulk-delete toolbar */}
+      <div className="flex flex-wrap items-center gap-3 mt-4 py-3 px-4 bg-muted/50 rounded-lg text-sm min-h-[48px]">
+        {selectedIds.size > 0 ? (
+          <>
+            <span className="font-medium">{selectedIds.size} row{selectedIds.size !== 1 ? 's' : ''} selected</span>
+            {confirmBulkDelete ? (
+              <>
+                <span className="text-destructive text-xs font-medium">
+                  Permanently delete {selectedIds.size} expense{selectedIds.size !== 1 ? 's' : ''}?
+                </span>
+                <button
+                  onClick={handleBulkDelete}
+                  disabled={bulkDeleting}
+                  className="px-3 py-1 text-xs font-medium bg-destructive text-destructive-foreground rounded-md hover:bg-destructive/90 disabled:opacity-50"
+                >
+                  {bulkDeleting ? 'Deleting…' : 'Confirm Delete'}
+                </button>
+                <button
+                  onClick={() => setConfirmBulkDelete(false)}
+                  className="px-3 py-1 text-xs font-medium border border-input rounded-md hover:bg-muted"
+                >
+                  Cancel
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  onClick={handleBulkDelete}
+                  className="px-3 py-1 text-xs font-medium border border-destructive text-destructive rounded-md hover:bg-destructive/10"
+                >
+                  Delete Selected
+                </button>
+                <button
+                  onClick={() => { setSelectedIds(new Set()); setConfirmBulkDelete(false); }}
+                  className="px-3 py-1 text-xs font-medium border border-input rounded-md hover:bg-muted"
+                >
+                  Clear Selection
+                </button>
+              </>
+            )}
+          </>
+        ) : (
+          <>
+            <div>
+              <span className="text-muted-foreground">Showing:</span>{' '}
+              <span className="font-medium">{expensesList.length}</span>
+              {total > LIMIT && <span className="text-muted-foreground"> of {total}</span>}
+            </div>
+            <div>
+              <span className="text-muted-foreground">Page total:</span>{' '}
+              <span className="font-medium text-red-600 dark:text-red-400">{formatCurrency(visibleTotal)}</span>
+            </div>
+          </>
+        )}
       </div>
 
-      {/* Error state */}
+      {/* Error */}
       {error && (
         <div className="mt-4 p-3 rounded-md text-sm bg-red-50 text-red-800 dark:bg-red-950 dark:text-red-200">
           {error}
-          <button
-            onClick={fetchExpenses}
-            className="ml-2 underline text-xs"
-          >
-            retry
-          </button>
+          <button onClick={fetchExpenses} className="ml-2 underline text-xs">retry</button>
         </div>
       )}
 
-      {/* Loading state */}
-      {loading && (
-        <p className="text-muted-foreground mt-6 text-sm">Loading expenses...</p>
-      )}
+      {/* Loading */}
+      {loading && <p className="text-muted-foreground mt-6 text-sm">Loading expenses...</p>}
 
-      {/* Expenses table */}
+      {/* Table */}
       {!loading && !error && (
         <>
           {expensesList.length === 0 ? (
@@ -283,25 +423,124 @@ export default function Expenses() {
               <table className="w-full text-sm">
                 <thead>
                   <tr>
-                    <th className="text-left py-3 px-4 font-medium text-muted-foreground bg-muted/50">Date</th>
+                    <th className="py-3 px-3 bg-muted/50 w-9">
+                      <input
+                        type="checkbox"
+                        checked={allCurrentPageSelected}
+                        onChange={toggleSelectAll}
+                        className="rounded border-input cursor-pointer"
+                        title="Select all on this page"
+                      />
+                    </th>
+                    <th className="text-left py-3 px-4 font-medium text-muted-foreground bg-muted/50 w-32">Date</th>
                     <th className="text-left py-3 px-4 font-medium text-muted-foreground bg-muted/50">Description</th>
-                    <th className="text-left py-3 px-4 font-medium text-muted-foreground bg-muted/50">Category</th>
-                    <th className="text-right py-3 px-4 font-medium text-muted-foreground bg-muted/50">Amount (AUD)</th>
-                    <th className="text-left py-3 px-4 font-medium text-muted-foreground bg-muted/50">Status</th>
+                    <th className="text-left py-3 px-4 font-medium text-muted-foreground bg-muted/50 w-52">Category</th>
+                    <th className="text-right py-3 px-4 font-medium text-muted-foreground bg-muted/50 w-36">Amount (AUD)</th>
+                    <th className="text-left py-3 px-4 font-medium text-muted-foreground bg-muted/50 w-24">Status</th>
+                    <th className="py-3 px-4 bg-muted/50 w-32">{/* actions */}</th>
                   </tr>
                 </thead>
                 <tbody>
                   {expensesList.map((expense) => {
+                    const isEditing  = editingId === expense.id;
+                    const isSelected = selectedIds.has(expense.id);
+                    const isConfirmingDelete = confirmDeleteId === expense.id;
+
+                    /* ── Edit row ─────────────────────────────────────── */
+                    if (isEditing) {
+                      return (
+                        <tr key={expense.id} className="border-b border-border bg-muted/20">
+                          <td className="py-3 px-3" />
+                          <td className="py-3 px-4">
+                            <input
+                              type="date"
+                              value={editDate}
+                              onChange={(e) => setEditDate(e.target.value)}
+                              className="w-full px-2 py-1 text-xs border border-input rounded bg-background"
+                            />
+                          </td>
+                          <td className="py-3 px-4">
+                            <input
+                              type="text"
+                              value={editDesc}
+                              onChange={(e) => setEditDesc(e.target.value)}
+                              className="w-full px-2 py-1 text-xs border border-input rounded bg-background"
+                            />
+                          </td>
+                          <td className="py-3 px-4">
+                            <div className="flex flex-col gap-1">
+                              <select
+                                value={editCatId}
+                                onChange={(e) => { setEditCatId(parseInt(e.target.value, 10)); setEditSubcatId(0); }}
+                                className="text-xs border border-input rounded px-1.5 py-1 bg-background w-full"
+                              >
+                                <option value={0}>No category</option>
+                                {categoriesList.map((c) => (
+                                  <option key={c.id} value={c.id}>{c.name}</option>
+                                ))}
+                              </select>
+                              <select
+                                value={editSubcatId}
+                                onChange={(e) => setEditSubcatId(parseInt(e.target.value, 10))}
+                                disabled={editSubcatOptions.length === 0}
+                                className="text-xs border border-input rounded px-1.5 py-1 bg-background w-full disabled:opacity-40"
+                              >
+                                <option value={0}>No subcategory</option>
+                                {editSubcatOptions.map((s) => (
+                                  <option key={s.id} value={s.id}>{s.name}</option>
+                                ))}
+                              </select>
+                            </div>
+                          </td>
+                          <td className="py-3 px-4 text-right tabular-nums text-red-600 dark:text-red-400 font-medium">
+                            {formatCurrency(expense.amount_aud)}
+                          </td>
+                          <td className="py-3 px-4">{statusBadge(expense.review_status)}</td>
+                          <td className="py-3 px-4">
+                            <div className="flex gap-1">
+                              <button
+                                onClick={saveEdit}
+                                disabled={editSaving}
+                                className="px-2 py-1 text-xs bg-primary text-primary-foreground rounded hover:bg-primary/90 disabled:opacity-50"
+                              >
+                                {editSaving ? 'Saving…' : 'Save'}
+                              </button>
+                              <button
+                                onClick={cancelEdit}
+                                className="px-2 py-1 text-xs border border-input rounded hover:bg-muted"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    }
+
+                    /* ── Normal row ───────────────────────────────────── */
                     const categoryDisplay = expense.category_name
                       ? expense.subcategory_name
-                        ? `${expense.category_name} > ${expense.subcategory_name}`
+                        ? `${expense.category_name} › ${expense.subcategory_name}`
                         : expense.category_name
                       : '';
                     const isUsd = expense.currency_original === 'USD';
 
                     return (
-                      <tr key={expense.id} className="border-b border-border hover:bg-muted/30 transition-colors">
-                        <td className="py-3 px-4 whitespace-nowrap">
+                      <tr
+                        key={expense.id}
+                        className={`border-b border-border transition-colors group ${
+                          isSelected ? 'bg-primary/5' : 'hover:bg-muted/30'
+                        }`}
+                      >
+                        <td className="py-3 px-3">
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => toggleSelect(expense.id)}
+                            className="rounded border-input cursor-pointer"
+                          />
+                        </td>
+                        <td className="py-3 px-4 whitespace-nowrap text-muted-foreground">
                           {formatDate(expense.date)}
                         </td>
                         <td className="py-3 px-4">
@@ -310,20 +549,57 @@ export default function Expenses() {
                           </span>
                         </td>
                         <td className="py-3 px-4 text-muted-foreground">
-                          {categoryDisplay || <span className="italic text-muted-foreground/60">Uncategorized</span>}
+                          {categoryDisplay || (
+                            <span className="italic text-muted-foreground/60">Uncategorized</span>
+                          )}
                         </td>
                         <td className="py-3 px-4 text-right">
-                          <div className="text-red-600 dark:text-red-400 font-medium">
+                          <div className="text-red-600 dark:text-red-400 font-medium tabular-nums">
                             {formatCurrency(expense.amount_aud)}
                           </div>
                           {isUsd && (
-                            <div className="text-xs text-muted-foreground">
+                            <div className="text-xs text-muted-foreground tabular-nums">
                               {formatUsd(expense.amount_original)} USD
                             </div>
                           )}
                         </td>
+                        <td className="py-3 px-4">{statusBadge(expense.review_status)}</td>
+
+                        {/* Actions — visible on row hover */}
                         <td className="py-3 px-4">
-                          {statusBadge(expense.review_status)}
+                          <div className="flex gap-1 justify-end opacity-0 group-hover:opacity-100 transition-opacity">
+                            {isConfirmingDelete ? (
+                              <>
+                                <button
+                                  onClick={() => handleDelete(expense.id)}
+                                  className="px-2 py-1 text-xs bg-destructive text-destructive-foreground rounded hover:bg-destructive/90 whitespace-nowrap"
+                                >
+                                  Confirm
+                                </button>
+                                <button
+                                  onClick={() => setConfirmDeleteId(null)}
+                                  className="px-2 py-1 text-xs border border-input rounded hover:bg-muted"
+                                >
+                                  Cancel
+                                </button>
+                              </>
+                            ) : (
+                              <>
+                                <button
+                                  onClick={() => startEdit(expense)}
+                                  className="px-2 py-1 text-xs border border-input rounded hover:bg-muted"
+                                >
+                                  Edit
+                                </button>
+                                <button
+                                  onClick={() => handleDelete(expense.id)}
+                                  className="px-2 py-1 text-xs border border-input rounded text-destructive hover:bg-destructive/10"
+                                >
+                                  Delete
+                                </button>
+                              </>
+                            )}
+                          </div>
                         </td>
                       </tr>
                     );
@@ -337,7 +613,7 @@ export default function Expenses() {
           {totalPages > 1 && (
             <div className="flex flex-wrap items-center justify-between gap-4 mt-6">
               <p className="text-sm text-muted-foreground">
-                Showing {rangeStart}-{rangeEnd} of {total}
+                Showing {rangeStart}–{rangeEnd} of {total}
               </p>
               <div className="flex items-center gap-1">
                 <button
@@ -349,9 +625,7 @@ export default function Expenses() {
                 </button>
                 {pageNumbers.map((pn, idx) =>
                   pn === 'ellipsis' ? (
-                    <span key={`ellipsis-${idx}`} className="px-2 py-1 text-sm text-muted-foreground">
-                      ...
-                    </span>
+                    <span key={`ellipsis-${idx}`} className="px-2 py-1 text-sm text-muted-foreground">…</span>
                   ) : (
                     <button
                       key={pn}

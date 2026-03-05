@@ -451,6 +451,7 @@ export async function categorizeNextBatch(batchId: number): Promise<{
   const results = await categorizeBatch(expensesForLlm, treeForLlm, fewShotExamples, {
     baseUrl: settings.lm_studio_base_url,
     model: settings.lm_studio_model,
+    contextLength: settings.lm_studio_context_length,
   });
 
   // 9. Save results

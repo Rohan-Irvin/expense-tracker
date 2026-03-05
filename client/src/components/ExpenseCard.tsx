@@ -1,12 +1,16 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import type { ExpenseWithSuggestion, CategoryWithChildren } from '@/types';
+import { categories as categoriesApi } from '@/api/client';
+import CategoryCombobox from './CategoryCombobox';
+import { Pencil } from 'lucide-react';
 
 interface Props {
   expense: ExpenseWithSuggestion;
   categories: CategoryWithChildren[];
   onApprove: (id: number, categoryId: number, subcategoryId?: number) => void;
-  onSkip: (id: number) => void;
+  onDelete: (id: number) => void;
   onSplit: (expense: ExpenseWithSuggestion) => void;
+  onCategoryCreated: (cat: CategoryWithChildren) => void;
 }
 
 const confidenceBadge = (confidence: string | null) => {
@@ -52,32 +56,59 @@ function formatCurrency(amount: number, currency?: string): string {
   return `${sign}${prefix}${abs}`;
 }
 
-export default function ExpenseCard({ expense, categories, onApprove, onSkip, onSplit }: Props) {
-  // Determine initial category from suggestion or existing assignment
+export default function ExpenseCard({ expense, categories, onApprove, onDelete, onSplit, onCategoryCreated }: Props) {
   const initialCatId = expense.suggested_category_id ?? expense.category_id ?? 0;
   const initialSubId = expense.suggested_subcategory_id ?? expense.subcategory_id ?? 0;
 
   const [selectedCategory, setSelectedCategory] = useState<number>(initialCatId);
   const [selectedSubcategory, setSelectedSubcategory] = useState<number>(initialSubId);
   const [showReasoning, setShowReasoning] = useState(false);
+  const [isEditingCategory, setIsEditingCategory] = useState(false);
 
-  // When the expense prop changes (e.g. after refresh), resync
   useEffect(() => {
-    setSelectedCategory(expense.suggested_category_id ?? expense.category_id ?? 0);
-    setSelectedSubcategory(expense.suggested_subcategory_id ?? expense.subcategory_id ?? 0);
-  }, [expense.id, expense.suggested_category_id, expense.category_id, expense.suggested_subcategory_id, expense.subcategory_id]);
+    setIsEditingCategory(false);
+    // For approved items seed from the actual approved category, not the original suggestion
+    if (expense.review_status === 'approved') {
+      setSelectedCategory(expense.category_id ?? expense.suggested_category_id ?? 0);
+      setSelectedSubcategory(expense.subcategory_id ?? expense.suggested_subcategory_id ?? 0);
+    } else {
+      setSelectedCategory(expense.suggested_category_id ?? expense.category_id ?? 0);
+      setSelectedSubcategory(expense.suggested_subcategory_id ?? expense.subcategory_id ?? 0);
+    }
+  }, [expense.id, expense.review_status, expense.suggested_category_id, expense.category_id, expense.suggested_subcategory_id, expense.subcategory_id]);
 
-  // Get subcategories for selected category
-  const parentCat = categories.find((c) => c.id === selectedCategory);
-  const subcategories = parentCat?.children ?? [];
+  // All subcategories from all parents — for the cross-tree search
+  const allSubcategories = useMemo(
+    () =>
+      categories.flatMap((c) =>
+        c.children.map((sub) => ({
+          id: sub.id,
+          name: sub.name,
+          secondaryLabel: c.name,
+          parent_id: c.id,
+        }))
+      ),
+    [categories]
+  );
 
-  // When parent category changes, reset subcategory if it doesn't belong
   const handleCategoryChange = (catId: number) => {
     setSelectedCategory(catId);
+    // Reset subcategory only if it doesn't belong to the new parent
     const newParent = categories.find((c) => c.id === catId);
     const childIds = newParent?.children.map((c) => c.id) ?? [];
     if (!childIds.includes(selectedSubcategory)) {
       setSelectedSubcategory(0);
+    }
+  };
+
+  const handleSubcategoryChange = (subId: number) => {
+    setSelectedSubcategory(subId);
+    if (subId !== 0) {
+      // Auto-fill parent if this subcategory belongs to a different parent
+      const sub = allSubcategories.find((s) => s.id === subId);
+      if (sub && sub.parent_id !== selectedCategory) {
+        setSelectedCategory(sub.parent_id);
+      }
     }
   };
 
@@ -92,7 +123,18 @@ export default function ExpenseCard({ expense, categories, onApprove, onSkip, on
   const isApproved = expense.review_status === 'approved';
   const isRuleApproved = isApproved && expense.confidence === 'rule';
   const showActions = isPending;
-  const showCategoryDropdowns = isPending || isRuleApproved;
+  const showCategorySelectors = isPending || isRuleApproved || (isApproved && !isRuleApproved && isEditingCategory);
+  const showEditCategoryButton = isApproved && !isRuleApproved && !isEditingCategory;
+
+  // Compute display names live from the categories prop so they stay correct after re-approval
+  const displayCatName =
+    expense.category_id
+      ? (categories.find((c) => c.id === expense.category_id)?.name ?? expense.category_name)
+      : expense.category_name;
+  const displaySubName =
+    expense.subcategory_id
+      ? (allSubcategories.find((s) => s.id === expense.subcategory_id)?.name ?? expense.subcategory_name)
+      : expense.subcategory_name;
 
   return (
     <div className="bg-card border rounded-lg p-4 space-y-3">
@@ -155,48 +197,69 @@ export default function ExpenseCard({ expense, categories, onApprove, onSkip, on
       )}
 
       {/* Category selectors */}
-      {showCategoryDropdowns && (
+      {showCategorySelectors && (
         <div className="flex gap-2">
           <div className="flex-1">
             <label className="block text-xs font-medium mb-1 text-muted-foreground">Category</label>
-            <select
+            <CategoryCombobox
+              items={categories.map((c) => ({ id: c.id, name: c.name }))}
               value={selectedCategory}
-              onChange={(e) => handleCategoryChange(Number(e.target.value))}
-              className="w-full px-2 py-1.5 text-sm border border-input rounded-md bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-            >
-              <option value={0}>-- Select --</option>
-              {categories.map((cat) => (
-                <option key={cat.id} value={cat.id}>
-                  {cat.name}
-                </option>
-              ))}
-            </select>
+              onChange={handleCategoryChange}
+              placeholder="Select category"
+              onCreateNew={async (name) => {
+                const created = await categoriesApi.create({ name });
+                onCategoryCreated({ ...created, children: [] });
+                return created;
+              }}
+            />
           </div>
           <div className="flex-1">
             <label className="block text-xs font-medium mb-1 text-muted-foreground">Subcategory</label>
-            <select
+            <CategoryCombobox
+              items={allSubcategories}
               value={selectedSubcategory}
-              onChange={(e) => setSelectedSubcategory(Number(e.target.value))}
-              disabled={!selectedCategory || subcategories.length === 0}
-              className="w-full px-2 py-1.5 text-sm border border-input rounded-md bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <option value={0}>-- Select --</option>
-              {subcategories.map((sub) => (
-                <option key={sub.id} value={sub.id}>
-                  {sub.name}
-                </option>
-              ))}
-            </select>
+              onChange={handleSubcategoryChange}
+              placeholder="Select subcategory"
+              onCreateNew={
+                selectedCategory
+                  ? async (name) => {
+                      const created = await categoriesApi.create({ name, parent_id: selectedCategory });
+                      const parentCat = categories.find((c) => c.id === selectedCategory)!;
+                      onCategoryCreated({
+                        ...parentCat,
+                        children: [...(parentCat.children ?? []), created],
+                      });
+                      return created;
+                    }
+                  : undefined
+              }
+            />
           </div>
         </div>
       )}
 
       {/* Category display for non-editable approved/skipped items */}
-      {!showCategoryDropdowns && (expense.category_name || expense.suggested_category_name) && (
-        <div className="text-xs text-muted-foreground">
-          Category: {expense.category_name || expense.suggested_category_name}
-          {(expense.subcategory_name || expense.suggested_subcategory_name) && (
-            <> / {expense.subcategory_name || expense.suggested_subcategory_name}</>
+      {!showCategorySelectors && (displayCatName || expense.suggested_category_name) && (
+        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <span>
+            Category: {displayCatName || expense.suggested_category_name}
+            {(displaySubName || expense.suggested_subcategory_name) && (
+              <> / {displaySubName || expense.suggested_subcategory_name}</>
+            )}
+          </span>
+          {showEditCategoryButton && (
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedCategory(expense.category_id ?? expense.suggested_category_id ?? 0);
+                setSelectedSubcategory(expense.subcategory_id ?? expense.suggested_subcategory_id ?? 0);
+                setIsEditingCategory(true);
+              }}
+              className="p-0.5 rounded hover:bg-secondary transition-colors"
+              title="Edit category"
+            >
+              <Pencil className="w-3 h-3" />
+            </button>
           )}
         </div>
       )}
@@ -212,10 +275,10 @@ export default function ExpenseCard({ expense, categories, onApprove, onSkip, on
             Approve
           </button>
           <button
-            onClick={() => onSkip(expense.id)}
-            className="px-3 py-1.5 text-sm font-medium bg-secondary text-secondary-foreground rounded-md hover:bg-secondary/80"
+            onClick={() => onDelete(expense.id)}
+            className="px-3 py-1.5 text-sm font-medium border border-destructive text-destructive rounded-md hover:bg-destructive/10"
           >
-            Skip
+            Delete
           </button>
           <button
             onClick={() => onSplit(expense)}
@@ -235,6 +298,29 @@ export default function ExpenseCard({ expense, categories, onApprove, onSkip, on
             className="px-3 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Update Category
+          </button>
+        </div>
+      )}
+
+      {/* For non-rule approved items in edit mode */}
+      {isApproved && !isRuleApproved && isEditingCategory && (
+        <div className="flex gap-2 pt-1">
+          <button
+            onClick={() => { setIsEditingCategory(false); handleApprove(); }}
+            disabled={!selectedCategory}
+            className="px-3 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            Update Category
+          </button>
+          <button
+            onClick={() => {
+              setSelectedCategory(expense.category_id ?? expense.suggested_category_id ?? 0);
+              setSelectedSubcategory(expense.subcategory_id ?? expense.suggested_subcategory_id ?? 0);
+              setIsEditingCategory(false);
+            }}
+            className="px-3 py-1.5 text-sm font-medium bg-secondary text-secondary-foreground rounded-md hover:bg-secondary/80"
+          >
+            Cancel
           </button>
         </div>
       )}

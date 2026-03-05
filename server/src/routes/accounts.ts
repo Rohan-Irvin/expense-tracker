@@ -49,4 +49,63 @@ router.post('/', async (req: Request, res: Response) => {
   }
 });
 
+// PATCH /api/accounts/:id — rename an account
+router.patch('/:id', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) return res.status(400).json({ error: 'Invalid id' });
+
+    const { name } = req.body;
+    if (!name || typeof name !== 'string' || name.trim().length === 0) {
+      return res.status(400).json({ error: 'Name is required' });
+    }
+
+    // Check for duplicate name (excluding this account)
+    const existing = await db.execute({
+      sql: 'SELECT id FROM accounts WHERE name = ? AND id != ?',
+      args: [name.trim(), id],
+    });
+    if (existing.rows.length > 0) {
+      return res.status(409).json({ error: 'An account with this name already exists' });
+    }
+
+    const result = await db.execute({
+      sql: `UPDATE accounts SET name = ? WHERE id = ? RETURNING *`,
+      args: [name.trim(), id],
+    });
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Account not found' });
+    }
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Error updating account:', err);
+    res.status(500).json({ error: 'Failed to update account' });
+  }
+});
+
+// DELETE /api/accounts/:id — delete an account (only if no transactions assigned)
+router.delete('/:id', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) return res.status(400).json({ error: 'Invalid id' });
+
+    // Protect: refuse if any expenses reference this account
+    const hasExpenses = await db.execute({
+      sql: 'SELECT id FROM expenses WHERE account_id = ? LIMIT 1',
+      args: [id],
+    });
+    if (hasExpenses.rows.length > 0) {
+      return res.status(409).json({ error: 'Cannot delete an account that has transactions assigned to it' });
+    }
+
+    await db.execute({ sql: 'DELETE FROM accounts WHERE id = ?', args: [id] });
+    res.status(204).send();
+  } catch (err) {
+    console.error('Error deleting account:', err);
+    res.status(500).json({ error: 'Failed to delete account' });
+  }
+});
+
 export default router;

@@ -82,6 +82,8 @@ export interface IncomeEntry {
   entry_type: 'csv_import' | 'manual';
   batch_id: number | null;
   note: string | null;
+  category_id: number | null;
+  category_name: string | null;
   created_at: string;
 }
 
