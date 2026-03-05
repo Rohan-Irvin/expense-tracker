@@ -86,9 +86,22 @@ export const income = {
   create: (data: any) => request<any>('/income', { method: 'POST', body: JSON.stringify(data) }),
   update: (id: number, data: any) => request<any>(`/income/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   delete: (id: number) => request<void>(`/income/${id}`, { method: 'DELETE' }),
+  bulkUpdateCategory: (ids: number[], income_category_id: number | null) =>
+    request<{ updated: number }>('/income/bulk-category', {
+      method: 'PATCH',
+      body: JSON.stringify({ ids, income_category_id }),
+    }),
   parse: (file: File) => uploadFile<any>('/income/parse', file),
   confirm: (file: File, columnMap: any, currency: string, dateFormat: string) =>
     uploadFile<any>('/income/confirm', file, { columnMap: JSON.stringify(columnMap), currency, dateFormat }),
+};
+
+// Income Categories (separate from expense categories)
+export const incomeCategories = {
+  list: () => request<any[]>('/income-categories'),
+  create: (name: string) => request<any>('/income-categories', { method: 'POST', body: JSON.stringify({ name }) }),
+  rename: (id: number, name: string) => request<any>(`/income-categories/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
+  delete: (id: number) => request<void>(`/income-categories/${id}`, { method: 'DELETE' }),
 };
 
 // Dashboard
@@ -99,11 +112,11 @@ export const dashboard = {
     if (to) params.set('to', to);
     return request<any>(`/dashboard/summary?${params.toString()}`);
   },
-  trends: (from: string, to: string, categoryIds?: number[]) => {
+  trends: (from: string, to: string, items?: string[]) => {
     const params = new URLSearchParams();
     params.set('from', from);
     params.set('to', to);
-    if (categoryIds && categoryIds.length > 0) params.set('category_ids', categoryIds.join(','));
+    if (items && items.length > 0) params.set('items', items.join(','));
     return request<any>(`/dashboard/trends?${params.toString()}`);
   },
 };

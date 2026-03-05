@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { dashboard, expenses as expensesApi, categories as categoriesApi } from '@/api/client';
 import type { DashboardSummary, CategoryBreakdown, CategoryWithChildren } from '@/types';
 import {
@@ -114,6 +114,7 @@ export default function Dashboard() {
   // -------------------------------------------------------------------------
   // Bar chart click state (month filter for category breakdown)
   // -------------------------------------------------------------------------
+  const chartRef = useRef<HTMLDivElement>(null);
   const [clickedBarMonth, setClickedBarMonth] = useState<string | null>(null);
   const [barMonthCats, setBarMonthCats] = useState<AggregatedCategory[] | null>(null);
   const [barMonthLoading, setBarMonthLoading] = useState(false);
@@ -236,6 +237,19 @@ export default function Dashboard() {
     dashboard.summary(month, month).then((result: any) => {
       setBarMonthCats(aggregateCategories((result as DashboardSummary).category_breakdown));
     }).catch(console.error).finally(() => setBarMonthLoading(false));
+  }, [clickedBarMonth]);
+
+  // Click outside the Monthly Trend chart to deselect the selected bar month
+  useEffect(() => {
+    if (!clickedBarMonth) return;
+    const handler = (e: MouseEvent) => {
+      if (chartRef.current && !chartRef.current.contains(e.target as Node)) {
+        setClickedBarMonth(null);
+        setBarMonthCats(null);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
   }, [clickedBarMonth]);
 
   const handleCatSelect = useCallback((catId: number) => {
@@ -440,7 +454,7 @@ export default function Dashboard() {
           </div>
 
           {/* Monthly Trend Chart */}
-          <div className="bg-card border rounded-lg p-6 mt-6">
+          <div ref={chartRef} className="bg-card border rounded-lg p-6 mt-6">
             <h2 className="text-lg font-semibold mb-4">Monthly Trend</h2>
             {trendData.length === 0 ? (
               <p className="text-muted-foreground text-sm">No trend data available for the selected range.</p>
@@ -511,7 +525,7 @@ export default function Dashboard() {
             </div>
             <p className="text-xs text-muted-foreground mb-4">
               {clickedBarMonth
-                ? `${formatMonth(clickedBarMonth)} · Click a category to drill down · Click bar again to deselect`
+                ? `${formatMonth(clickedBarMonth)} · Click a category to drill down · Click outside chart or bar again to deselect`
                 : `${formatMonth(appliedFrom)} – ${formatMonth(appliedTo)} · Click a bar or category to drill down`}
               {barMonthLoading && ' · Loading…'}
             </p>

@@ -149,8 +149,9 @@ router.get('/summary', async (req: Request, res: Response) => {
 });
 
 // ---------------------------------------------------------------------------
-// GET /api/dashboard/trends?from=YYYY-MM&to=YYYY-MM&category_ids=1,2,3
-// Returns monthly totals per category for the selected range
+// GET /api/dashboard/trends?from=YYYY-MM&to=YYYY-MM&items=cat:1,cat:2,sub:3
+// items: comma-separated list of "cat:ID" (category) and "sub:ID" (subcategory) keys
+// Returns monthly totals per selected item as series
 // ---------------------------------------------------------------------------
 
 router.get('/trends', async (req: Request, res: Response) => {
@@ -165,44 +166,28 @@ router.get('/trends', async (req: Request, res: Response) => {
       return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
     })();
 
-    const categoryIdsParam = (req.query.category_ids as string) || '';
-    const categoryIds = categoryIdsParam
+    // Parse items=cat:1,sub:3,cat:2 into separate id arrays
+    const itemsParam = (req.query.items as string) || '';
+    const parsedItems = itemsParam
       .split(',')
-      .map((s) => parseInt(s.trim(), 10))
-      .filter((n) => !isNaN(n));
+      .map((s) => {
+        const [type, idStr] = s.trim().split(':');
+        const id = parseInt(idStr, 10);
+        return (type === 'cat' || type === 'sub') && !isNaN(id) ? { type: type as 'cat' | 'sub', id } : null;
+      })
+      .filter(Boolean) as { type: 'cat' | 'sub'; id: number }[];
+
+    const catIds = parsedItems.filter((i) => i.type === 'cat').map((i) => i.id);
+    const subIds = parsedItems.filter((i) => i.type === 'sub').map((i) => i.id);
+
+    if (catIds.length === 0 && subIds.length === 0) {
+      return res.json({ months: [], series: [], data: [] });
+    }
 
     const dateFrom = `${fromMonth}-01`;
     const toDate = new Date(toMonth + '-01');
     toDate.setMonth(toDate.getMonth() + 1);
     const dateTo = `${toDate.getFullYear()}-${String(toDate.getMonth() + 1).padStart(2, '0')}-01`;
-
-    const catWhere = categoryIds.length > 0
-      ? `AND e.category_id IN (${categoryIds.map(() => '?').join(',')})`
-      : '';
-
-    const result = await db.execute({
-      sql: `SELECT strftime('%Y-%m', e.date) as month,
-                   e.category_id,
-                   c.name as category_name,
-                   SUM(e.amount_aud) as total_aud
-            FROM expenses e
-            LEFT JOIN categories c ON e.category_id = c.id
-            WHERE e.review_status IN ('approved', 'skipped')
-              AND e.split_parent_id IS NULL
-              AND e.date >= ? AND e.date < ?
-              AND e.category_id IS NOT NULL
-              ${catWhere}
-            GROUP BY month, e.category_id
-            ORDER BY month, category_name`,
-      args: [dateFrom, dateTo, ...categoryIds],
-    });
-
-    const rows = result.rows as unknown as {
-      month: string;
-      category_id: number;
-      category_name: string;
-      total_aud: number;
-    }[];
 
     // Build complete months array (fill gaps so chart has every month)
     const months: string[] = [];
@@ -213,22 +198,80 @@ router.get('/trends', async (req: Request, res: Response) => {
       cursor.setMonth(cursor.getMonth() + 1);
     }
 
-    // Unique categories in result order
-    const catMap = new Map<number, string>();
-    for (const row of rows) {
-      if (!catMap.has(row.category_id)) {
-        catMap.set(row.category_id, row.category_name || 'Unknown');
+    interface DataRow { month: string; series_key: string; total_aud: number; }
+    const allRows: DataRow[] = [];
+
+    // Query 1: category-level items (filter by category_id, regardless of subcategory)
+    if (catIds.length > 0) {
+      const catResult = await db.execute({
+        sql: `SELECT strftime('%Y-%m', e.date) as month,
+                     'cat:' || e.category_id as series_key,
+                     SUM(e.amount_aud) as total_aud
+              FROM expenses e
+              WHERE e.review_status IN ('approved', 'skipped')
+                AND e.split_parent_id IS NULL
+                AND e.date >= ? AND e.date < ?
+                AND e.category_id IN (${catIds.map(() => '?').join(',')})
+              GROUP BY month, e.category_id
+              ORDER BY month`,
+        args: [dateFrom, dateTo, ...catIds],
+      });
+      for (const row of catResult.rows as unknown as DataRow[]) {
+        allRows.push({ month: row.month, series_key: row.series_key, total_aud: Math.round(row.total_aud * 100) / 100 });
       }
     }
-    const categories = Array.from(catMap.entries()).map(([id, name]) => ({ id, name }));
 
-    const data = rows.map((row) => ({
-      month: row.month,
-      category_id: row.category_id,
-      total_aud: Math.round(row.total_aud * 100) / 100,
-    }));
+    // Query 2: subcategory-level items (filter by subcategory_id specifically)
+    if (subIds.length > 0) {
+      const subResult = await db.execute({
+        sql: `SELECT strftime('%Y-%m', e.date) as month,
+                     'sub:' || e.subcategory_id as series_key,
+                     SUM(e.amount_aud) as total_aud
+              FROM expenses e
+              WHERE e.review_status IN ('approved', 'skipped')
+                AND e.split_parent_id IS NULL
+                AND e.date >= ? AND e.date < ?
+                AND e.subcategory_id IN (${subIds.map(() => '?').join(',')})
+              GROUP BY month, e.subcategory_id
+              ORDER BY month`,
+        args: [dateFrom, dateTo, ...subIds],
+      });
+      for (const row of subResult.rows as unknown as DataRow[]) {
+        allRows.push({ month: row.month, series_key: row.series_key, total_aud: Math.round(row.total_aud * 100) / 100 });
+      }
+    }
 
-    res.json({ months, categories, data });
+    // Build series metadata (name lookups) preserving the user's selection order
+    const seriesMap = new Map<string, { key: string; name: string; type: 'category' | 'subcategory' }>();
+    if (catIds.length > 0) {
+      const catNames = await db.execute({
+        sql: `SELECT id, name FROM categories WHERE id IN (${catIds.map(() => '?').join(',')})`,
+        args: catIds,
+      });
+      for (const row of catNames.rows as unknown as { id: number; name: string }[]) {
+        seriesMap.set(`cat:${row.id}`, { key: `cat:${row.id}`, name: row.name, type: 'category' });
+      }
+    }
+    if (subIds.length > 0) {
+      const subNames = await db.execute({
+        sql: `SELECT c.id, c.name, p.name as parent_name
+              FROM categories c
+              LEFT JOIN categories p ON c.parent_id = p.id
+              WHERE c.id IN (${subIds.map(() => '?').join(',')})`,
+        args: subIds,
+      });
+      for (const row of subNames.rows as unknown as { id: number; name: string; parent_name: string | null }[]) {
+        const displayName = row.parent_name ? `${row.parent_name} › ${row.name}` : row.name;
+        seriesMap.set(`sub:${row.id}`, { key: `sub:${row.id}`, name: displayName, type: 'subcategory' });
+      }
+    }
+
+    // Return series in the order the user selected them
+    const series = parsedItems
+      .map((i) => seriesMap.get(`${i.type}:${i.id}`))
+      .filter(Boolean);
+
+    res.json({ months, series, data: allRows });
   } catch (err) {
     console.error('Error fetching trends data:', err);
     res.status(500).json({ error: 'Failed to fetch trends data' });

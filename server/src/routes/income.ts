@@ -47,9 +47,9 @@ const upload = multer({ storage: multer.memoryStorage() });
 router.get('/', async (_req: Request, res: Response) => {
   try {
     const result = await db.execute({
-      sql: `SELECT ie.*, c.name as category_name
+      sql: `SELECT ie.*, ic.name as income_category_name
             FROM income_entries ie
-            LEFT JOIN categories c ON ie.category_id = c.id
+            LEFT JOIN income_categories ic ON ie.income_category_id = ic.id
             ORDER BY ie.date DESC`,
       args: [],
     });
@@ -67,7 +67,7 @@ router.get('/', async (_req: Request, res: Response) => {
 
 router.post('/', async (req: Request, res: Response) => {
   try {
-    const { date, source, amount_original, currency_original, note, category_id } = req.body;
+    const { date, source, amount_original, currency_original, note, income_category_id } = req.body;
 
     if (!date || !source || amount_original === undefined || !currency_original) {
       return res.status(400).json({ error: 'date, source, amount_original, and currency_original are required' });
@@ -85,10 +85,10 @@ router.post('/', async (req: Request, res: Response) => {
     }
 
     const result = await db.execute({
-      sql: `INSERT INTO income_entries (date, source, amount_original, currency_original, exchange_rate, amount_aud, entry_type, note, category_id, created_at)
+      sql: `INSERT INTO income_entries (date, source, amount_original, currency_original, exchange_rate, amount_aud, entry_type, note, income_category_id, created_at)
             VALUES (?, ?, ?, ?, ?, ?, 'manual', ?, ?, datetime('now'))
             RETURNING *`,
-      args: [date, source, amount_original, currency_original, exchangeRate, amountAud, note ?? null, category_id ?? null],
+      args: [date, source, amount_original, currency_original, exchangeRate, amountAud, note ?? null, income_category_id ?? null],
     });
 
     res.status(201).json(result.rows[0]);
@@ -207,6 +207,33 @@ router.post('/confirm', upload.single('file'), async (req: Request, res: Respons
 });
 
 // ---------------------------------------------------------------------------
+// PATCH /api/income/bulk-category — assign a category to multiple entries at once
+// Body: { ids: number[], income_category_id: number | null }
+// ---------------------------------------------------------------------------
+
+router.patch('/bulk-category', async (req: Request, res: Response) => {
+  try {
+    const { ids, income_category_id } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ error: 'ids must be a non-empty array' });
+    }
+    const catId = income_category_id ?? null;
+    await Promise.all(
+      ids.map((id: number) =>
+        db.execute({
+          sql: `UPDATE income_entries SET income_category_id = ? WHERE id = ?`,
+          args: [catId, id],
+        })
+      )
+    );
+    res.json({ updated: ids.length });
+  } catch (err) {
+    console.error('Error bulk updating income categories:', err);
+    res.status(500).json({ error: 'Failed to update categories' });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // PUT /api/income/:id — update an income entry
 // ---------------------------------------------------------------------------
 
@@ -215,7 +242,7 @@ router.put('/:id', async (req: Request, res: Response) => {
     const id = parseInt(req.params.id, 10);
     if (isNaN(id)) return res.status(400).json({ error: 'Invalid id' });
 
-    const { date, source, amount_original, currency_original, note, category_id } = req.body;
+    const { date, source, amount_original, currency_original, note, income_category_id } = req.body;
 
     if (!date || !source || amount_original === undefined || !currency_original) {
       return res.status(400).json({ error: 'date, source, amount_original, and currency_original are required' });
@@ -235,10 +262,10 @@ router.put('/:id', async (req: Request, res: Response) => {
     const result = await db.execute({
       sql: `UPDATE income_entries
             SET date = ?, source = ?, amount_original = ?, currency_original = ?,
-                exchange_rate = ?, amount_aud = ?, note = ?, category_id = ?
+                exchange_rate = ?, amount_aud = ?, note = ?, income_category_id = ?
             WHERE id = ?
             RETURNING *`,
-      args: [date, source, amount_original, currency_original, exchangeRate, amountAud, note ?? null, category_id ?? null, id],
+      args: [date, source, amount_original, currency_original, exchangeRate, amountAud, note ?? null, income_category_id ?? null, id],
     });
 
     if (result.rows.length === 0) {

@@ -174,10 +174,24 @@ export async function runMigrations(): Promise<void> {
     UPDATE app_settings SET value = '10' WHERE key = 'llm_batch_size' AND value = '20'
   `);
 
-  // Migration: add category_id to income_entries (idempotent — SQLite ignores duplicate column errors)
+  // 12. income_categories — separate category list just for income entries
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS income_categories (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL
+    )
+  `);
+
+  // Migration: add category_id to income_entries (kept for backwards compat, now unused)
   await db.execute(
     `ALTER TABLE income_entries ADD COLUMN category_id INTEGER REFERENCES categories(id)`
-  ).catch(() => {}); // Silently ignore if column already exists
+  ).catch(() => {});
+
+  // Migration: add income_category_id referencing the new income_categories table
+  await db.execute(
+    `ALTER TABLE income_entries ADD COLUMN income_category_id INTEGER REFERENCES income_categories(id)`
+  ).catch(() => {});
 
   console.log('Database migrations completed successfully.');
 }
