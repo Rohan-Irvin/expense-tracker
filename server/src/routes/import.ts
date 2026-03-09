@@ -62,8 +62,17 @@ router.post('/import/confirm', upload.single('file'), async (req: Request, res: 
 
     const currency = (accountResult.rows[0] as unknown as { currency: 'AUD' | 'USD' }).currency;
 
-    // Parse all rows using the confirmed column map
-    const rows = applyColumnMap(req.file.buffer, columnMap);
+    // Parse all rows using the confirmed column map; drop any rows where the
+    // amount is NaN / Infinity / zero (header rows, total rows, empty rows).
+    const rows = applyColumnMap(req.file.buffer, columnMap).filter(
+      (r) => r.date && r.description && isFinite(r.amount) && r.amount > 0
+    );
+
+    if (rows.length === 0) {
+      return res.status(400).json({
+        error: 'No valid transactions found in the CSV. Check that the column mapping is correct and the file contains rows with valid dates, descriptions, and amounts.',
+      });
+    }
 
     // Create the import batch
     const batchResult = await db.execute({
@@ -323,7 +332,9 @@ router.get('/import/:batchId/review', async (req: Request, res: Response) => {
               c1.name as category_name, c2.name as subcategory_name,
               c3.name as suggested_category_name, c4.name as suggested_subcategory_name
             FROM expenses e
-            LEFT JOIN llm_suggestions ls ON ls.expense_id = e.id
+            LEFT JOIN llm_suggestions ls ON ls.id = (
+                SELECT id FROM llm_suggestions WHERE expense_id = e.id ORDER BY id DESC LIMIT 1
+              )
             LEFT JOIN categories c1 ON e.category_id = c1.id
             LEFT JOIN categories c2 ON e.subcategory_id = c2.id
             LEFT JOIN categories c3 ON ls.suggested_category_id = c3.id

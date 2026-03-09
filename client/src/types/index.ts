@@ -130,6 +130,9 @@ export interface AppSettings {
   lm_studio_context_length: string;
   default_currency: string;
   llm_batch_size: string;
+  llm_provider: string;      // 'local' | 'openai'
+  openai_api_key: string;
+  openai_model: string;
 }
 
 export interface MonthlyTrendPoint {

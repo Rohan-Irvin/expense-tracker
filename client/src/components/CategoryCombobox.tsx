@@ -39,14 +39,28 @@ export default function CategoryCombobox({
   const computeDropdownStyle = useCallback(() => {
     if (!containerRef.current) return;
     const rect = containerRef.current.getBoundingClientRect();
-    setDropdownStyle({
-      position: 'fixed',
-      top: rect.bottom + 4,
-      left: rect.left,
-      width: rect.width,
-      minWidth: 180,
-      zIndex: 50,
-    });
+    const maxDropdownHeight = 228; // matches max-h-[224px] + border
+    const spaceBelow = window.innerHeight - rect.bottom - 4;
+    const openUpward = spaceBelow < maxDropdownHeight && rect.top >= maxDropdownHeight;
+    setDropdownStyle(
+      openUpward
+        ? {
+            position: 'fixed',
+            bottom: window.innerHeight - rect.top + 4,
+            left: rect.left,
+            width: rect.width,
+            minWidth: 180,
+            zIndex: 50,
+          }
+        : {
+            position: 'fixed',
+            top: rect.bottom + 4,
+            left: rect.left,
+            width: rect.width,
+            minWidth: 180,
+            zIndex: 50,
+          }
+    );
   }, []);
 
   // Close on outside click

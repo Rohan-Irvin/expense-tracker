@@ -196,6 +196,22 @@ router.delete('/:id', async (req: Request, res: Response) => {
     const id = parseInt(req.params.id, 10);
     if (isNaN(id)) return res.status(400).json({ error: 'Invalid id' });
 
+    // Delete dependent rows first (FK constraints are enforced by libsql)
+    // 1. LLM suggestions referencing this expense
+    await db.execute({ sql: `DELETE FROM llm_suggestions WHERE expense_id = ?`, args: [id] });
+    // 2. LLM suggestions for any split children
+    await db.execute({
+      sql: `DELETE FROM llm_suggestions WHERE expense_id IN (SELECT id FROM expenses WHERE split_parent_id = ?)`,
+      args: [id],
+    });
+    // 3. Split child expenses
+    await db.execute({ sql: `DELETE FROM expenses WHERE split_parent_id = ?`, args: [id] });
+    // 4. Unlink any matched Amazon orders (don't delete the order itself)
+    await db.execute({
+      sql: `UPDATE amazon_orders SET matched_expense_id = NULL WHERE matched_expense_id = ?`,
+      args: [id],
+    });
+    // 5. Finally delete the expense itself
     await db.execute({ sql: `DELETE FROM expenses WHERE id = ?`, args: [id] });
 
     res.status(204).send();

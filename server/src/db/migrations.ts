@@ -174,6 +174,29 @@ export async function runMigrations(): Promise<void> {
     UPDATE app_settings SET value = '10' WHERE key = 'llm_batch_size' AND value = '20'
   `);
 
+  // Deduplicate llm_suggestions — keep only the latest row per expense_id.
+  // Duplicates can occur when the import-wizard categorize step and the
+  // review-page Resume Categorization run concurrently (e.g. the user
+  // navigates away while an OpenAI request is still in-flight).
+  // This runs on every startup; it's a no-op when there are no duplicates.
+  await db.execute(`
+    DELETE FROM llm_suggestions
+    WHERE id NOT IN (
+      SELECT MAX(id) FROM llm_suggestions GROUP BY expense_id
+    )
+  `);
+
+  // LLM provider toggle and OpenAI settings
+  await db.execute(`
+    INSERT OR IGNORE INTO app_settings (key, value) VALUES ('llm_provider', 'local')
+  `);
+  await db.execute(`
+    INSERT OR IGNORE INTO app_settings (key, value) VALUES ('openai_api_key', '')
+  `);
+  await db.execute(`
+    INSERT OR IGNORE INTO app_settings (key, value) VALUES ('openai_model', 'gpt-4o-mini')
+  `);
+
   // 12. income_categories — separate category list just for income entries
   await db.execute(`
     CREATE TABLE IF NOT EXISTS income_categories (

@@ -51,7 +51,15 @@ async function fetchCategoryTree(): Promise<CategoryWithChildren[]> {
 // Helper: fetch app settings
 // ---------------------------------------------------------------------------
 
-async function fetchSettings(): Promise<{ lm_studio_base_url: string; lm_studio_model: string; llm_batch_size: number; lm_studio_context_length: number }> {
+async function fetchSettings(): Promise<{
+  lm_studio_base_url: string;
+  lm_studio_model: string;
+  llm_batch_size: number;
+  lm_studio_context_length: number;
+  llm_provider: 'local' | 'openai';
+  openai_api_key: string;
+  openai_model: string;
+}> {
   const result = await db.execute('SELECT key, value FROM app_settings');
   const settings: Record<string, string> = {};
   for (const row of result.rows) {
@@ -63,6 +71,9 @@ async function fetchSettings(): Promise<{ lm_studio_base_url: string; lm_studio_
     lm_studio_model: settings.lm_studio_model || 'qwen3.5-35b-a3b',
     llm_batch_size: parseInt(settings.llm_batch_size || '10', 10),
     lm_studio_context_length: parseInt(settings.lm_studio_context_length || '20000', 10),
+    llm_provider: (settings.llm_provider === 'openai' ? 'openai' : 'local') as 'local' | 'openai',
+    openai_api_key: settings.openai_api_key || '',
+    openai_model: settings.openai_model || 'gpt-4o-mini',
   };
 }
 
@@ -148,10 +159,13 @@ export async function categorizeBatchExpenses(
       });
 
       // Insert into llm_suggestions with confidence = 'rule'
+      // WHERE NOT EXISTS prevents a duplicate row if two categorize-next
+      // calls race (e.g. import-wizard step vs. review-page resume button).
       await db.execute({
         sql: `INSERT INTO llm_suggestions (expense_id, suggested_category_id, suggested_subcategory_id, confidence, llm_reasoning, model_used, created_at)
-              VALUES (?, ?, ?, 'rule', ?, 'rule-engine', datetime('now'))`,
-        args: [expense.id, rule.category_id, rule.subcategory_id, `Matched merchant rule: ${rule.description_pattern}`],
+              SELECT ?, ?, ?, 'rule', ?, 'rule-engine', datetime('now')
+              WHERE NOT EXISTS (SELECT 1 FROM llm_suggestions WHERE expense_id = ?)`,
+        args: [expense.id, rule.category_id, rule.subcategory_id, `Matched merchant rule: ${rule.description_pattern}`, expense.id],
       });
 
       // Update rule match count
@@ -262,21 +276,26 @@ export async function categorizeBatchExpenses(
 
   // 10. Split into batches and process
   const batchSize = settings.llm_batch_size;
+  const modelUsed = settings.llm_provider === 'openai' ? settings.openai_model : settings.lm_studio_model;
   for (let i = 0; i < expensesForLlm.length; i += batchSize) {
     const batch = expensesForLlm.slice(i, i + batchSize);
 
     const results = await categorizeBatch(batch, treeForLlm, fewShotExamples, {
+      provider: settings.llm_provider,
       baseUrl: settings.lm_studio_base_url,
       model: settings.lm_studio_model,
       contextLength: settings.lm_studio_context_length,
+      apiKey: settings.openai_api_key,
+      openaiModel: settings.openai_model,
     });
 
     // 11. For each result, insert suggestion and update expense
     for (const result of results) {
       await db.execute({
         sql: `INSERT INTO llm_suggestions (expense_id, suggested_category_id, suggested_subcategory_id, confidence, llm_reasoning, model_used, created_at)
-              VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`,
-        args: [result.expense_id, result.category_id, result.subcategory_id, result.confidence, result.reasoning, settings.lm_studio_model],
+              SELECT ?, ?, ?, ?, ?, ?, datetime('now')
+              WHERE NOT EXISTS (SELECT 1 FROM llm_suggestions WHERE expense_id = ?)`,
+        args: [result.expense_id, result.category_id, result.subcategory_id, result.confidence, result.reasoning, modelUsed, result.expense_id],
       });
 
       // Set category on the expense but keep review_status = 'pending'
@@ -364,8 +383,9 @@ export async function categorizeNextBatch(batchId: number): Promise<{
       });
       await db.execute({
         sql: `INSERT INTO llm_suggestions (expense_id, suggested_category_id, suggested_subcategory_id, confidence, llm_reasoning, model_used, created_at)
-              VALUES (?, ?, ?, 'rule', ?, 'rule-engine', datetime('now'))`,
-        args: [expense.id, rule.category_id, rule.subcategory_id, `Matched merchant rule: ${rule.description_pattern}`],
+              SELECT ?, ?, ?, 'rule', ?, 'rule-engine', datetime('now')
+              WHERE NOT EXISTS (SELECT 1 FROM llm_suggestions WHERE expense_id = ?)`,
+        args: [expense.id, rule.category_id, rule.subcategory_id, `Matched merchant rule: ${rule.description_pattern}`, expense.id],
       });
       await db.execute({
         sql: `UPDATE merchant_rules SET match_count = match_count + 1, last_matched_at = datetime('now') WHERE id = ?`,
@@ -448,18 +468,24 @@ export async function categorizeNextBatch(batchId: number): Promise<{
     children: cat.children.map((child) => ({ id: child.id, name: child.name })),
   }));
 
+  const modelUsed = settings.llm_provider === 'openai' ? settings.openai_model : settings.lm_studio_model;
+
   const results = await categorizeBatch(expensesForLlm, treeForLlm, fewShotExamples, {
+    provider: settings.llm_provider,
     baseUrl: settings.lm_studio_base_url,
     model: settings.lm_studio_model,
     contextLength: settings.lm_studio_context_length,
+    apiKey: settings.openai_api_key,
+    openaiModel: settings.openai_model,
   });
 
   // 9. Save results
   for (const result of results) {
     await db.execute({
       sql: `INSERT INTO llm_suggestions (expense_id, suggested_category_id, suggested_subcategory_id, confidence, llm_reasoning, model_used, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`,
-      args: [result.expense_id, result.category_id, result.subcategory_id, result.confidence, result.reasoning, settings.lm_studio_model],
+            SELECT ?, ?, ?, ?, ?, ?, datetime('now')
+            WHERE NOT EXISTS (SELECT 1 FROM llm_suggestions WHERE expense_id = ?)`,
+      args: [result.expense_id, result.category_id, result.subcategory_id, result.confidence, result.reasoning, modelUsed, result.expense_id],
     });
     await db.execute({
       sql: `UPDATE expenses SET category_id = ?, subcategory_id = ?, updated_at = datetime('now') WHERE id = ?`,

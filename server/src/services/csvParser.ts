@@ -279,8 +279,9 @@ export function applyColumnMap(
     let amount: number;
 
     if (columnMap.amount_type === 'split') {
-      const debitStr = (row[columnMap.debit!] ?? '').replace(/,/g, '').trim();
-      const creditStr = (row[columnMap.credit!] ?? '').replace(/,/g, '').trim();
+      // Strip everything except digits, dot and minus (handles $, £, spaces, commas, etc.)
+      const debitStr = (row[columnMap.debit!] ?? '').replace(/[^0-9.\-]/g, '').trim();
+      const creditStr = (row[columnMap.credit!] ?? '').replace(/[^0-9.\-]/g, '').trim();
 
       const debitVal = debitStr ? parseFloat(debitStr) : 0;
       const creditVal = creditStr ? parseFloat(creditStr) : 0;
@@ -288,8 +289,8 @@ export function applyColumnMap(
       // Take whichever is non-empty / non-zero
       amount = debitVal !== 0 ? Math.abs(debitVal) : Math.abs(creditVal);
     } else {
-      // Single signed column
-      const rawAmount = (row[columnMap.amount!] ?? '').replace(/,/g, '').trim();
+      // Single signed column — strip everything except digits, dot and minus
+      const rawAmount = (row[columnMap.amount!] ?? '').replace(/[^0-9.\-]/g, '').trim();
       const parsed = parseFloat(rawAmount);
 
       if (columnMap.sign_convention === 'negative_is_debit') {

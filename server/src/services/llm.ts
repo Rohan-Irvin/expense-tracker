@@ -8,12 +8,25 @@ export interface CategorizationResult {
   reasoning: string;
 }
 
+export type LlmProvider = 'local' | 'openai';
+
+export interface LlmSettings {
+  provider: LlmProvider;
+  // Local LLM (LM Studio) settings
+  baseUrl: string;
+  model: string;
+  contextLength?: number;
+  // OpenAI settings
+  apiKey?: string;
+  openaiModel?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 /** Return a clean, user-friendly error message from an LLM API error. */
-function cleanLlmError(err: any): string {
+function cleanLlmError(err: any, provider: LlmProvider): string {
   const raw: string = err?.message || String(err) || 'Unknown LLM error';
 
   if (
@@ -21,7 +34,10 @@ function cleanLlmError(err: any): string {
     err?.code === 'ECONNREFUSED' ||
     raw.includes('ECONNREFUSED')
   ) {
-    return 'Cannot connect to LM Studio. Make sure LM Studio is running with the local server enabled.';
+    if (provider === 'local') {
+      return 'Cannot connect to LM Studio. Make sure LM Studio is running with the local server enabled.';
+    }
+    return 'Cannot connect to the LLM service. Check your network connection.';
   }
 
   if (raw.includes('<!DOCTYPE') || raw.includes('<html') || raw.includes('<HTML')) {
@@ -30,6 +46,19 @@ function cleanLlmError(err: any): string {
       'Make sure your model is fully loaded in LM Studio, then try again. ' +
       'You can verify with Settings → Test LLM Connection.'
     );
+  }
+
+  // OpenAI-specific errors
+  if (provider === 'openai') {
+    if (raw.includes('401') || raw.includes('Incorrect API key') || raw.includes('invalid_api_key')) {
+      return 'Invalid OpenAI API key. Check your key in Settings.';
+    }
+    if (raw.includes('429') || raw.includes('rate_limit')) {
+      return 'OpenAI rate limit reached. Wait a moment and try again.';
+    }
+    if (raw.includes('insufficient_quota')) {
+      return 'OpenAI quota exceeded. Check your OpenAI account billing.';
+    }
   }
 
   return raw;
@@ -74,13 +103,21 @@ export async function categorizeBatch(
   expenses: { id: number; date: string; description: string; amount_aud: number }[],
   categoryTree: { id: number; name: string; children: { id: number; name: string }[] }[],
   fewShotExamples: { description: string; category_name: string; subcategory_name: string | null }[],
-  settings: { baseUrl: string; model: string; contextLength?: number }
+  settings: LlmSettings
 ): Promise<CategorizationResult[]> {
+  const provider = settings.provider ?? 'local';
+  const isOpenAI = provider === 'openai';
+
+  // Determine actual API endpoint and key based on provider
+  const baseURL = isOpenAI ? 'https://api.openai.com/v1' : settings.baseUrl;
+  const apiKey = isOpenAI ? (settings.apiKey || '') : 'lm-studio';
+  const modelName = isOpenAI ? (settings.openaiModel || 'gpt-4o-mini') : settings.model;
+
   const client = new OpenAI({
-    baseURL: settings.baseUrl,
-    apiKey: 'lm-studio',
-    timeout: 5 * 60 * 1000, // 5 minutes — surfaces LM Studio hangs quickly
-    maxRetries: 0,
+    baseURL,
+    apiKey,
+    timeout: 5 * 60 * 1000, // 5 minutes
+    maxRetries: isOpenAI ? 2 : 0, // OpenAI is reliable; LM Studio retries cause hangs
   });
 
   // Build the set of valid category IDs for response validation
@@ -113,7 +150,7 @@ export async function categorizeBatch(
 
   // No response_format / json_schema — grammar-constrained decoding causes
   // LM Studio to hang indefinitely on some models. Plain text + a clear
-  // prompt instruction is more reliable and avoids the hang.
+  // prompt instruction is more reliable.
   const systemPrompt = `Categorize expenses. For each, pick the best category (and subcategory if applicable) from the list below. Return ONLY a JSON object with a "results" array — no explanation, no markdown.
 
 Categories:
@@ -126,22 +163,26 @@ JSON format for each result: {"expense_id":<int>,"category_id":<int>,"subcategor
 
   let content: string | null = null;
 
+  // Build completion params — context_length is an LM Studio extension ignored by real OpenAI
+  const completionParams: any = {
+    model: modelName,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userMessage },
+    ],
+    temperature: 0.6,
+    top_p: 0.95,
+  };
+
+  if (!isOpenAI && settings.contextLength) {
+    completionParams.context_length = settings.contextLength;
+  }
+
   try {
-    const response = await client.chat.completions.create({
-      model: settings.model,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userMessage },
-      ],
-      temperature: 0.6,
-      top_p: 0.95,
-      // No response_format — avoids grammar-constrained generation hangs
-      // context_length is a LM Studio extension; ignored by other servers
-      ...(settings.contextLength ? { context_length: settings.contextLength } : {}),
-    } as any);
+    const response = await client.chat.completions.create(completionParams);
     content = response.choices[0]?.message?.content ?? null;
   } catch (err: any) {
-    throw new Error(cleanLlmError(err));
+    throw new Error(cleanLlmError(err, provider));
   }
 
   if (!content) {

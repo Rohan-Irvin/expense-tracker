@@ -551,7 +551,7 @@ export default function ReviewBatch() {
               className={`transition-all duration-300 ease-out overflow-hidden ${
                 removingIds.has(expense.id)
                   ? 'opacity-0 -translate-y-1 max-h-0'
-                  : 'opacity-100 translate-y-0 max-h-[600px]'
+                  : 'opacity-100 max-h-[600px]'
               }`}
             >
               <ExpenseCard
