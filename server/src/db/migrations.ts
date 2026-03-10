@@ -216,5 +216,20 @@ export async function runMigrations(): Promise<void> {
     `ALTER TABLE income_entries ADD COLUMN income_category_id INTEGER REFERENCES income_categories(id)`
   ).catch(() => {});
 
+  // Migration: income detection — tag each expense row as 'expense' or 'income'
+  await db.execute(
+    `ALTER TABLE expenses ADD COLUMN transaction_type TEXT NOT NULL DEFAULT 'expense'`
+  ).catch(() => {});
+
+  // Migration: store the income category chosen during review (staging column, cleared at finalize)
+  await db.execute(
+    `ALTER TABLE expenses ADD COLUMN income_category_id INTEGER REFERENCES income_categories(id)`
+  ).catch(() => {});
+
+  // Migration: LLM-suggested income category on llm_suggestions
+  await db.execute(
+    `ALTER TABLE llm_suggestions ADD COLUMN suggested_income_category_id INTEGER REFERENCES income_categories(id)`
+  ).catch(() => {});
+
   console.log('Database migrations completed successfully.');
 }

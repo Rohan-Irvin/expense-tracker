@@ -53,6 +53,8 @@ export interface Expense {
   category_id: number | null;
   subcategory_id: number | null;
   split_parent_id: number | null;
+  transaction_type: 'expense' | 'income';
+  income_category_id: number | null;
   review_status: 'pending' | 'approved' | 'skipped' | 'split';
   note: string | null;
   created_at: string;
@@ -62,6 +64,8 @@ export interface Expense {
 export interface ExpenseWithSuggestion extends Expense {
   suggested_category_id: number | null;
   suggested_subcategory_id: number | null;
+  suggested_income_category_id: number | null;
+  income_category_name: string | null;
   confidence: string | null;
   llm_reasoning: string | null;
   category_name: string | null;
@@ -69,6 +73,12 @@ export interface ExpenseWithSuggestion extends Expense {
   suggested_category_name: string | null;
   suggested_subcategory_name: string | null;
   children?: Expense[];
+}
+
+export interface IncomeCategory {
+  id: number;
+  name: string;
+  created_at: string;
 }
 
 export interface IncomeEntry {

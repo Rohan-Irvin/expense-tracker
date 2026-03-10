@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { importApi, categories as categoriesApi, expenses as expensesApi } from '@/api/client';
-import type { ExpenseWithSuggestion, CategoryWithChildren, ImportBatch, SplitRow } from '@/types';
+import { importApi, categories as categoriesApi, expenses as expensesApi, incomeCategories as incomeCategoriesApi } from '@/api/client';
+import type { ExpenseWithSuggestion, CategoryWithChildren, ImportBatch, SplitRow, IncomeCategory } from '@/types';
 import ExpenseCard from '@/components/ExpenseCard';
 import SplitDialog from '@/components/SplitDialog';
 
@@ -17,6 +17,7 @@ export default function ReviewBatch() {
   const [batch, setBatch] = useState<ImportBatch | null>(null);
   const [allExpenses, setAllExpenses] = useState<ExpenseWithSuggestion[]>([]);
   const [categories, setCategories] = useState<CategoryWithChildren[]>([]);
+  const [incomeCategories, setIncomeCategories] = useState<IncomeCategory[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -48,10 +49,11 @@ export default function ReviewBatch() {
         throw new Error(err.error || reviewResponse.statusText);
       }
       const reviewData = await reviewResponse.json();
-      const catData = await categoriesApi.list();
+      const [catData, icData] = await Promise.all([categoriesApi.list(), incomeCategoriesApi.list()]);
       setBatch(reviewData.batch);
       setAllExpenses(reviewData.expenses);
       setCategories(catData);
+      setIncomeCategories(icData);
       setError(null);
     } catch (err: any) {
       setError(err.message || 'Failed to load batch data.');
@@ -126,12 +128,19 @@ export default function ReviewBatch() {
   // Actions
   const handleApprove = async (id: number, categoryId: number, subcategoryId?: number) => {
     try {
-      await expensesApi.approve(id, { category_id: categoryId, subcategory_id: subcategoryId });
+      const expense = allExpenses.find((e) => e.id === id);
+      const isIncome = expense?.transaction_type === 'income';
+      const body = isIncome
+        ? { income_category_id: categoryId }
+        : { category_id: categoryId, subcategory_id: subcategoryId };
+      await expensesApi.approve(id, body);
       animateThenUpdate(id, () =>
         setAllExpenses((prev) =>
           prev.map((e) =>
             e.id === id
-              ? { ...e, review_status: 'approved' as const, category_id: categoryId, subcategory_id: subcategoryId ?? null }
+              ? isIncome
+                ? { ...e, review_status: 'approved' as const, income_category_id: categoryId }
+                : { ...e, review_status: 'approved' as const, category_id: categoryId, subcategory_id: subcategoryId ?? null }
               : e
           )
         )
@@ -170,7 +179,11 @@ export default function ReviewBatch() {
 
   // Bulk: Approve all high-confidence
   const highConfidencePending = useMemo(
-    () => allExpenses.filter((e) => e.review_status === 'pending' && e.confidence === 'high' && e.suggested_category_id),
+    () => allExpenses.filter((e) =>
+      e.review_status === 'pending' &&
+      e.confidence === 'high' &&
+      (e.transaction_type === 'income' ? e.suggested_income_category_id : e.suggested_category_id)
+    ),
     [allExpenses]
   );
 
@@ -180,23 +193,25 @@ export default function ReviewBatch() {
     setStatusMessage(null);
     try {
       await Promise.all(
-        highConfidencePending.map((e) =>
-          expensesApi.approve(e.id, {
-            category_id: e.suggested_category_id!,
-            subcategory_id: e.suggested_subcategory_id ?? undefined,
-          })
-        )
+        highConfidencePending.map((e) => {
+          const isIncome = e.transaction_type === 'income';
+          return expensesApi.approve(e.id, isIncome
+            ? { income_category_id: e.suggested_income_category_id! }
+            : { category_id: e.suggested_category_id!, subcategory_id: e.suggested_subcategory_id ?? undefined }
+          );
+        })
       );
       // Update local state
       const ids = new Set(highConfidencePending.map((e) => e.id));
       setAllExpenses((prev) =>
-        prev.map((e) =>
-          ids.has(e.id)
-            ? { ...e, review_status: 'approved' as const, category_id: e.suggested_category_id, subcategory_id: e.suggested_subcategory_id }
-            : e
-        )
+        prev.map((e) => {
+          if (!ids.has(e.id)) return e;
+          return e.transaction_type === 'income'
+            ? { ...e, review_status: 'approved' as const, income_category_id: e.suggested_income_category_id }
+            : { ...e, review_status: 'approved' as const, category_id: e.suggested_category_id, subcategory_id: e.suggested_subcategory_id };
+        })
       );
-      setStatusMessage({ type: 'success', text: `Approved ${highConfidencePending.length} high-confidence expenses.` });
+      setStatusMessage({ type: 'success', text: `Approved ${highConfidencePending.length} high-confidence transactions.` });
     } catch (err: any) {
       setStatusMessage({ type: 'error', text: `Bulk approve failed: ${err.message}` });
     } finally {
@@ -206,7 +221,12 @@ export default function ReviewBatch() {
 
   // Bulk: Approve all pending
   const allPendingWithCategory = useMemo(
-    () => allExpenses.filter((e) => e.review_status === 'pending' && (e.suggested_category_id || e.category_id)),
+    () => allExpenses.filter((e) =>
+      e.review_status === 'pending' &&
+      (e.transaction_type === 'income'
+        ? (e.suggested_income_category_id || e.income_category_id)
+        : (e.suggested_category_id || e.category_id))
+    ),
     [allExpenses]
   );
 
@@ -218,28 +238,31 @@ export default function ReviewBatch() {
     try {
       await Promise.all(
         allPendingWithCategory.map((e) => {
+          if (e.transaction_type === 'income') {
+            const icId = e.suggested_income_category_id ?? e.income_category_id;
+            return expensesApi.approve(e.id, { income_category_id: icId! });
+          }
           const catId = e.suggested_category_id ?? e.category_id;
           const subId = e.suggested_subcategory_id ?? e.subcategory_id;
-          return expensesApi.approve(e.id, {
-            category_id: catId!,
-            subcategory_id: subId ?? undefined,
-          });
+          return expensesApi.approve(e.id, { category_id: catId!, subcategory_id: subId ?? undefined });
         })
       );
       const ids = new Set(allPendingWithCategory.map((e) => e.id));
       setAllExpenses((prev) =>
-        prev.map((e) =>
-          ids.has(e.id)
-            ? {
-                ...e,
-                review_status: 'approved' as const,
-                category_id: e.suggested_category_id ?? e.category_id,
-                subcategory_id: e.suggested_subcategory_id ?? e.subcategory_id,
-              }
-            : e
-        )
+        prev.map((e) => {
+          if (!ids.has(e.id)) return e;
+          if (e.transaction_type === 'income') {
+            return { ...e, review_status: 'approved' as const, income_category_id: e.suggested_income_category_id ?? e.income_category_id };
+          }
+          return {
+            ...e,
+            review_status: 'approved' as const,
+            category_id: e.suggested_category_id ?? e.category_id,
+            subcategory_id: e.suggested_subcategory_id ?? e.subcategory_id,
+          };
+        })
       );
-      setStatusMessage({ type: 'success', text: `Approved ${allPendingWithCategory.length} expenses.` });
+      setStatusMessage({ type: 'success', text: `Approved ${allPendingWithCategory.length} transactions.` });
     } catch (err: any) {
       setStatusMessage({ type: 'error', text: `Bulk approve failed: ${err.message}` });
     } finally {
@@ -557,6 +580,7 @@ export default function ReviewBatch() {
               <ExpenseCard
                 expense={expense}
                 categories={categories}
+                incomeCategories={incomeCategories}
                 onApprove={handleApprove}
                 onDelete={handleDelete}
                 onSplit={handleSplitOpen}

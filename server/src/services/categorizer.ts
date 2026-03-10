@@ -1,5 +1,5 @@
 import db from '../db/connection.js';
-import { categorizeBatch } from './llm.js';
+import { categorizeBatch, categorizeIncomeBatch } from './llm.js';
 import type { Category, CategoryWithChildren, Expense } from '../types/index.js';
 
 // ---------------------------------------------------------------------------
@@ -359,14 +359,68 @@ export async function categorizeNextBatch(batchId: number): Promise<{
     return { done, total, remaining: 0 };
   }
 
-  // 3. Fetch category tree and settings
+  // 3. Fetch category tree, income categories, and settings
   const categoryTree = await fetchCategoryTree();
   const settings = await fetchSettings();
 
-  // 4. Pass 1 — Merchant Rule Matching (on all unprocessed)
+  const incomeCatResult = await db.execute(`SELECT id, name FROM income_categories ORDER BY name ASC`);
+  const incomeCategories = incomeCatResult.rows as unknown as { id: number; name: string }[];
+
+  // Split unprocessed rows by transaction type
+  const incomeToProcess = toProcess.filter((e) => (e as any).transaction_type === 'income');
+  const expenseToProcess = toProcess.filter((e) => (e as any).transaction_type !== 'income');
+
+  const modelUsed = settings.llm_provider === 'openai' ? settings.openai_model : settings.lm_studio_model;
+  const llmSettings = {
+    provider: settings.llm_provider,
+    baseUrl: settings.lm_studio_base_url,
+    model: settings.lm_studio_model,
+    contextLength: settings.lm_studio_context_length,
+    apiKey: settings.openai_api_key,
+    openaiModel: settings.openai_model,
+  };
+
+  // -------------------------------------------------------------------------
+  // 4a. Income pass — skip merchant rules, categorize with income LLM
+  // -------------------------------------------------------------------------
+  const batchSize = settings.llm_batch_size;
+  const incomeBatch = incomeToProcess.slice(0, batchSize);
+
+  if (incomeBatch.length > 0 && incomeCategories.length > 0) {
+    const incomeForLlm = incomeBatch.map((e) => ({
+      id: e.id, date: e.date, description: e.description, amount_aud: e.amount_aud,
+    }));
+
+    const incomeResults = await categorizeIncomeBatch(incomeForLlm, incomeCategories, llmSettings);
+
+    for (const result of incomeResults) {
+      await db.execute({
+        sql: `INSERT INTO llm_suggestions (expense_id, suggested_income_category_id, confidence, llm_reasoning, model_used, created_at)
+              SELECT ?, ?, ?, ?, ?, datetime('now')
+              WHERE NOT EXISTS (SELECT 1 FROM llm_suggestions WHERE expense_id = ?)`,
+        args: [result.expense_id, result.income_category_id, result.confidence, result.reasoning, modelUsed, result.expense_id],
+      });
+    }
+  } else if (incomeBatch.length > 0) {
+    // No income categories configured — insert a placeholder so they're marked processed
+    for (const e of incomeBatch) {
+      await db.execute({
+        sql: `INSERT INTO llm_suggestions (expense_id, confidence, llm_reasoning, model_used, created_at)
+              SELECT ?, 'low', 'No income categories configured', 'none', datetime('now')
+              WHERE NOT EXISTS (SELECT 1 FROM llm_suggestions WHERE expense_id = ?)`,
+        args: [e.id, e.id],
+      });
+    }
+  }
+
+  done += incomeBatch.length;
+
+  // -------------------------------------------------------------------------
+  // 4b. Expense pass — Merchant Rule Matching
+  // -------------------------------------------------------------------------
   const remainingExpenses: Expense[] = [];
 
-  for (const expense of toProcess) {
+  for (const expense of expenseToProcess) {
     const normalized = normalizeDescription(expense.description);
     const ruleResult = await db.execute({
       sql: `SELECT * FROM merchant_rules WHERE description_pattern = ? LIMIT 1`,
@@ -397,11 +451,9 @@ export async function categorizeNextBatch(batchId: number): Promise<{
     }
   }
 
-  if (remainingExpenses.length === 0) {
-    return { done, total, remaining: 0 };
-  }
-
-  // 5. Few-shot examples
+  // -------------------------------------------------------------------------
+  // 5. Few-shot examples (for expense LLM only)
+  // -------------------------------------------------------------------------
   const fewShotResult = await db.execute({
     sql: `SELECT e.description, c1.name as category_name, c2.name as subcategory_name,
                  e.category_id, e.subcategory_id
@@ -410,6 +462,7 @@ export async function categorizeNextBatch(batchId: number): Promise<{
           LEFT JOIN categories c2 ON e.subcategory_id = c2.id
           WHERE e.review_status = 'approved'
             AND e.split_parent_id IS NULL
+            AND e.transaction_type != 'income'
             AND NOT EXISTS (SELECT 1 FROM llm_suggestions ls WHERE ls.expense_id = e.id AND ls.confidence = 'rule')
           ORDER BY e.updated_at DESC`,
     args: [],
@@ -431,8 +484,12 @@ export async function categorizeNextBatch(batchId: number): Promise<{
     }
   }
 
+  if (remainingExpenses.length === 0) {
+    const remaining = incomeToProcess.length - incomeBatch.length;
+    return { done, total, remaining };
+  }
+
   // 6. Take ONE batch worth of expenses for LLM
-  const batchSize = settings.llm_batch_size;
   const batch = remainingExpenses.slice(0, batchSize);
   const batchIds = batch.map((e) => e.id);
 
@@ -468,18 +525,9 @@ export async function categorizeNextBatch(batchId: number): Promise<{
     children: cat.children.map((child) => ({ id: child.id, name: child.name })),
   }));
 
-  const modelUsed = settings.llm_provider === 'openai' ? settings.openai_model : settings.lm_studio_model;
+  const results = await categorizeBatch(expensesForLlm, treeForLlm, fewShotExamples, llmSettings);
 
-  const results = await categorizeBatch(expensesForLlm, treeForLlm, fewShotExamples, {
-    provider: settings.llm_provider,
-    baseUrl: settings.lm_studio_base_url,
-    model: settings.lm_studio_model,
-    contextLength: settings.lm_studio_context_length,
-    apiKey: settings.openai_api_key,
-    openaiModel: settings.openai_model,
-  });
-
-  // 9. Save results
+  // 9. Save expense results
   for (const result of results) {
     await db.execute({
       sql: `INSERT INTO llm_suggestions (expense_id, suggested_category_id, suggested_subcategory_id, confidence, llm_reasoning, model_used, created_at)
@@ -494,7 +542,7 @@ export async function categorizeNextBatch(batchId: number): Promise<{
   }
 
   done += batch.length;
-  const remaining = remainingExpenses.length - batch.length;
+  const remaining = (remainingExpenses.length - batch.length) + (incomeToProcess.length - incomeBatch.length);
 
   return { done, total, remaining };
 }

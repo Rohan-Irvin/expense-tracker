@@ -8,6 +8,13 @@ export interface CategorizationResult {
   reasoning: string;
 }
 
+export interface IncomeCategorizationResult {
+  expense_id: number;
+  income_category_id: number;
+  confidence: 'high' | 'medium' | 'low';
+  reasoning: string;
+}
+
 export type LlmProvider = 'local' | 'openai';
 
 export interface LlmSettings {
@@ -228,5 +235,90 @@ JSON format for each result: {"expense_id":<int>,"category_id":<int>,"subcategor
   }
 
   console.log(`[llm] Validated ${validated.length}/${parsed.results.length} results`);
+  return validated;
+}
+
+// ---------------------------------------------------------------------------
+// categorizeIncomeBatch — flat income category assignment (no subcategories)
+// ---------------------------------------------------------------------------
+
+export async function categorizeIncomeBatch(
+  expenses: { id: number; date: string; description: string; amount_aud: number }[],
+  incomeCategories: { id: number; name: string }[],
+  settings: LlmSettings
+): Promise<IncomeCategorizationResult[]> {
+  if (expenses.length === 0 || incomeCategories.length === 0) return [];
+
+  const provider = settings.provider ?? 'local';
+  const isOpenAI = provider === 'openai';
+
+  const baseURL = isOpenAI ? 'https://api.openai.com/v1' : settings.baseUrl;
+  const apiKey = isOpenAI ? (settings.apiKey || '') : 'lm-studio';
+  const modelName = isOpenAI ? (settings.openaiModel || 'gpt-4o-mini') : settings.model;
+
+  const client = new OpenAI({
+    baseURL,
+    apiKey,
+    timeout: 5 * 60 * 1000,
+    maxRetries: isOpenAI ? 2 : 0,
+  });
+
+  const validIds = new Set(incomeCategories.map((c) => c.id));
+  const categoryList = incomeCategories.map((c) => `[id:${c.id}] ${c.name}`).join('\n');
+
+  const systemPrompt = `Categorize income transactions. For each, pick the best income category from the list below. Return ONLY a JSON object with a "results" array — no explanation, no markdown.
+
+Income categories:
+${categoryList}
+
+JSON format for each result: {"expense_id":<int>,"income_category_id":<int>,"confidence":"high"|"medium"|"low","reasoning":"<brief>"}`;
+
+  const completionParams: any = {
+    model: modelName,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: JSON.stringify(expenses) },
+    ],
+    temperature: 0.6,
+    top_p: 0.95,
+  };
+
+  if (!isOpenAI && settings.contextLength) {
+    completionParams.context_length = settings.contextLength;
+  }
+
+  let content: string | null = null;
+  try {
+    const response = await client.chat.completions.create(completionParams);
+    content = response.choices[0]?.message?.content ?? null;
+  } catch (err: any) {
+    throw new Error(cleanLlmError(err, provider));
+  }
+
+  if (!content) return [];
+
+  // Reuse the same JSON parser — strip think tags, code fences, etc.
+  // The response shape has "results" array just like categorizeBatch.
+  const parsed = parseJsonFromText(content) as any;
+  if (!parsed || !Array.isArray(parsed.results)) {
+    console.error('[llm] Failed to parse income JSON:', content.slice(0, 300));
+    return [];
+  }
+
+  const validated: IncomeCategorizationResult[] = [];
+  for (const result of parsed.results) {
+    if (!validIds.has(result.income_category_id)) {
+      console.warn(`[llm] Skipping income expense ${result.expense_id}: invalid income_category_id ${result.income_category_id}`);
+      continue;
+    }
+    validated.push({
+      expense_id: result.expense_id,
+      income_category_id: result.income_category_id,
+      confidence: result.confidence,
+      reasoning: result.reasoning,
+    });
+  }
+
+  console.log(`[llm] Income validated ${validated.length}/${parsed.results.length} results`);
   return validated;
 }

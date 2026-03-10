@@ -98,9 +98,9 @@ router.post('/import/confirm', upload.single('file'), async (req: Request, res: 
       }
 
       await db.execute({
-        sql: `INSERT INTO expenses (batch_id, account_id, date, description, amount_original, currency_original, exchange_rate, amount_aud, review_status, created_at, updated_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))`,
-        args: [batchId, accountId, row.date, row.description, row.amount, currency, exchangeRate, amountAud],
+        sql: `INSERT INTO expenses (batch_id, account_id, date, description, amount_original, currency_original, exchange_rate, amount_aud, transaction_type, review_status, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))`,
+        args: [batchId, accountId, row.date, row.description, row.amount, currency, exchangeRate, amountAud, row.transaction_type],
       });
     }
 
@@ -329,8 +329,10 @@ router.get('/import/:batchId/review', async (req: Request, res: Response) => {
     const expensesResult = await db.execute({
       sql: `SELECT e.*,
               ls.suggested_category_id, ls.suggested_subcategory_id, ls.confidence, ls.llm_reasoning,
+              ls.suggested_income_category_id,
               c1.name as category_name, c2.name as subcategory_name,
-              c3.name as suggested_category_name, c4.name as suggested_subcategory_name
+              c3.name as suggested_category_name, c4.name as suggested_subcategory_name,
+              ic_sugg.name as income_category_name
             FROM expenses e
             LEFT JOIN llm_suggestions ls ON ls.id = (
                 SELECT id FROM llm_suggestions WHERE expense_id = e.id ORDER BY id DESC LIMIT 1
@@ -339,6 +341,7 @@ router.get('/import/:batchId/review', async (req: Request, res: Response) => {
             LEFT JOIN categories c2 ON e.subcategory_id = c2.id
             LEFT JOIN categories c3 ON ls.suggested_category_id = c3.id
             LEFT JOIN categories c4 ON ls.suggested_subcategory_id = c4.id
+            LEFT JOIN income_categories ic_sugg ON ic_sugg.id = ls.suggested_income_category_id
             WHERE e.batch_id = ? AND e.split_parent_id IS NULL
             ORDER BY e.date ASC`,
       args: [batchId],
@@ -391,16 +394,26 @@ router.patch('/expenses/:id/approve', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Invalid expense id' });
     }
 
-    const { category_id, subcategory_id } = req.body;
-    if (!category_id) {
-      return res.status(400).json({ error: 'category_id is required' });
+    const { category_id, subcategory_id, income_category_id } = req.body;
+    if (!category_id && !income_category_id) {
+      return res.status(400).json({ error: 'category_id or income_category_id is required' });
     }
 
-    const result = await db.execute({
-      sql: `UPDATE expenses SET category_id = ?, subcategory_id = ?, review_status = 'approved', updated_at = datetime('now')
-            WHERE id = ? RETURNING *`,
-      args: [category_id, subcategory_id ?? null, id],
-    });
+    let result;
+    if (income_category_id !== undefined) {
+      // Income transaction: store the chosen income category
+      result = await db.execute({
+        sql: `UPDATE expenses SET income_category_id = ?, review_status = 'approved', updated_at = datetime('now')
+              WHERE id = ? RETURNING *`,
+        args: [income_category_id, id],
+      });
+    } else {
+      result = await db.execute({
+        sql: `UPDATE expenses SET category_id = ?, subcategory_id = ?, review_status = 'approved', updated_at = datetime('now')
+              WHERE id = ? RETURNING *`,
+        args: [category_id, subcategory_id ?? null, id],
+      });
+    }
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Expense not found' });
@@ -560,13 +573,35 @@ router.post('/import/:batchId/finalize', async (req: Request, res: Response) => 
       return res.status(400).json({ error: 'Invalid batchId' });
     }
 
+    // Move approved income rows into income_entries, then delete from expenses
+    const incomeRows = await db.execute({
+      sql: `SELECT * FROM expenses WHERE batch_id = ? AND transaction_type = 'income' AND review_status = 'approved'`,
+      args: [batchId],
+    });
+
+    for (const row of incomeRows.rows as any[]) {
+      await db.execute({
+        sql: `INSERT INTO income_entries (date, source, amount_original, currency_original, exchange_rate, amount_aud, entry_type, batch_id, income_category_id, created_at)
+              VALUES (?, ?, ?, ?, ?, ?, 'csv_import', ?, ?, datetime('now'))`,
+        args: [row.date, row.description, row.amount_original, row.currency_original,
+               row.exchange_rate, row.amount_aud, batchId, row.income_category_id ?? null],
+      });
+    }
+
+    if (incomeRows.rows.length > 0) {
+      const incomeIds = (incomeRows.rows as any[]).map((r) => r.id as number);
+      const placeholders = incomeIds.map(() => '?').join(',');
+      await db.execute({ sql: `DELETE FROM llm_suggestions WHERE expense_id IN (${placeholders})`, args: incomeIds });
+      await db.execute({ sql: `DELETE FROM expenses WHERE id IN (${placeholders})`, args: incomeIds });
+    }
+
     // Update batch status to approved
     await db.execute({
       sql: `UPDATE import_batches SET status = 'approved' WHERE id = ?`,
       args: [batchId],
     });
 
-    // Update merchant rules from approved expenses
+    // Update merchant rules from approved expense rows only
     await updateMerchantRules(batchId);
 
     res.json({ ok: true });

@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import type { ExpenseWithSuggestion, CategoryWithChildren } from '@/types';
+import type { ExpenseWithSuggestion, CategoryWithChildren, IncomeCategory } from '@/types';
 import { categories as categoriesApi } from '@/api/client';
 import CategoryCombobox from './CategoryCombobox';
 import { Pencil } from 'lucide-react';
@@ -7,6 +7,7 @@ import { Pencil } from 'lucide-react';
 interface Props {
   expense: ExpenseWithSuggestion;
   categories: CategoryWithChildren[];
+  incomeCategories: IncomeCategory[];
   onApprove: (id: number, categoryId: number, subcategoryId?: number) => void;
   onDelete: (id: number) => void;
   onSplit: (expense: ExpenseWithSuggestion) => void;
@@ -56,26 +57,39 @@ function formatCurrency(amount: number, currency?: string): string {
   return `${sign}${prefix}${abs}`;
 }
 
-export default function ExpenseCard({ expense, categories, onApprove, onDelete, onSplit, onCategoryCreated }: Props) {
+export default function ExpenseCard({ expense, categories, incomeCategories, onApprove, onDelete, onSplit, onCategoryCreated }: Props) {
+  const isIncome = expense.transaction_type === 'income';
+
   const initialCatId = expense.suggested_category_id ?? expense.category_id ?? 0;
   const initialSubId = expense.suggested_subcategory_id ?? expense.subcategory_id ?? 0;
+  const initialIncomeCatId = expense.suggested_income_category_id ?? expense.income_category_id ?? 0;
 
   const [selectedCategory, setSelectedCategory] = useState<number>(initialCatId);
   const [selectedSubcategory, setSelectedSubcategory] = useState<number>(initialSubId);
+  const [selectedIncomeCategory, setSelectedIncomeCategory] = useState<number>(initialIncomeCatId);
   const [showReasoning, setShowReasoning] = useState(false);
   const [isEditingCategory, setIsEditingCategory] = useState(false);
 
   useEffect(() => {
     setIsEditingCategory(false);
-    // For approved items seed from the actual approved category, not the original suggestion
-    if (expense.review_status === 'approved') {
-      setSelectedCategory(expense.category_id ?? expense.suggested_category_id ?? 0);
-      setSelectedSubcategory(expense.subcategory_id ?? expense.suggested_subcategory_id ?? 0);
+    if (isIncome) {
+      if (expense.review_status === 'approved') {
+        setSelectedIncomeCategory(expense.income_category_id ?? expense.suggested_income_category_id ?? 0);
+      } else {
+        setSelectedIncomeCategory(expense.suggested_income_category_id ?? expense.income_category_id ?? 0);
+      }
     } else {
-      setSelectedCategory(expense.suggested_category_id ?? expense.category_id ?? 0);
-      setSelectedSubcategory(expense.suggested_subcategory_id ?? expense.subcategory_id ?? 0);
+      // For approved items seed from the actual approved category, not the original suggestion
+      if (expense.review_status === 'approved') {
+        setSelectedCategory(expense.category_id ?? expense.suggested_category_id ?? 0);
+        setSelectedSubcategory(expense.subcategory_id ?? expense.suggested_subcategory_id ?? 0);
+      } else {
+        setSelectedCategory(expense.suggested_category_id ?? expense.category_id ?? 0);
+        setSelectedSubcategory(expense.suggested_subcategory_id ?? expense.subcategory_id ?? 0);
+      }
     }
-  }, [expense.id, expense.review_status, expense.suggested_category_id, expense.category_id, expense.suggested_subcategory_id, expense.subcategory_id]);
+  }, [isIncome, expense.id, expense.review_status, expense.suggested_category_id, expense.category_id,
+      expense.suggested_subcategory_id, expense.subcategory_id, expense.suggested_income_category_id, expense.income_category_id]);
 
   // All subcategories from all parents — for the cross-tree search
   const allSubcategories = useMemo(
@@ -113,11 +127,18 @@ export default function ExpenseCard({ expense, categories, onApprove, onDelete, 
   };
 
   const handleApprove = () => {
-    if (!selectedCategory) return;
-    onApprove(expense.id, selectedCategory, selectedSubcategory || undefined);
+    if (isIncome) {
+      if (!selectedIncomeCategory) return;
+      onApprove(expense.id, selectedIncomeCategory);
+    } else {
+      if (!selectedCategory) return;
+      onApprove(expense.id, selectedCategory, selectedSubcategory || undefined);
+    }
   };
 
-  const badge = confidenceBadge(expense.confidence);
+  const badge = isIncome
+    ? { label: 'Income', classes: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900 dark:text-emerald-200' }
+    : confidenceBadge(expense.confidence);
   const status = statusBadge(expense.review_status, expense.confidence);
   const isPending = expense.review_status === 'pending';
   const isApproved = expense.review_status === 'approved';
@@ -137,7 +158,7 @@ export default function ExpenseCard({ expense, categories, onApprove, onDelete, 
       : expense.subcategory_name;
 
   return (
-    <div className="bg-card border rounded-lg p-4 space-y-3">
+    <div className={`bg-card border rounded-lg p-4 space-y-3 ${isIncome ? 'border-l-4 border-l-emerald-400' : ''}`}>
       {/* Top row: date, description, amount, badges */}
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="flex-1 min-w-0">
@@ -159,8 +180,8 @@ export default function ExpenseCard({ expense, categories, onApprove, onDelete, 
           </p>
         </div>
         <div className="text-right shrink-0">
-          <p className="text-sm font-semibold">
-            {formatCurrency(expense.amount_aud)}
+          <p className={`text-sm font-semibold ${isIncome ? 'text-emerald-600 dark:text-emerald-400' : ''}`}>
+            {isIncome ? '+' : ''}{formatCurrency(expense.amount_aud)}
           </p>
           {expense.currency_original !== 'AUD' && (
             <p className="text-xs text-muted-foreground">
@@ -198,70 +219,112 @@ export default function ExpenseCard({ expense, categories, onApprove, onDelete, 
 
       {/* Category selectors */}
       {showCategorySelectors && (
-        <div className="flex gap-2">
-          <div className="flex-1">
-            <label className="block text-xs font-medium mb-1 text-muted-foreground">Category</label>
+        isIncome ? (
+          /* Income: single flat category selector */
+          <div>
+            <label className="block text-xs font-medium mb-1 text-muted-foreground">Income Category</label>
             <CategoryCombobox
-              items={categories.map((c) => ({ id: c.id, name: c.name }))}
-              value={selectedCategory}
-              onChange={handleCategoryChange}
-              placeholder="Select category"
-              onCreateNew={async (name) => {
-                const created = await categoriesApi.create({ name });
-                onCategoryCreated({ ...created, children: [] });
-                return created;
-              }}
+              items={incomeCategories.map((c) => ({ id: c.id, name: c.name }))}
+              value={selectedIncomeCategory}
+              onChange={setSelectedIncomeCategory}
+              placeholder="Select income category"
             />
           </div>
-          <div className="flex-1">
-            <label className="block text-xs font-medium mb-1 text-muted-foreground">Subcategory</label>
-            <CategoryCombobox
-              items={allSubcategories}
-              value={selectedSubcategory}
-              onChange={handleSubcategoryChange}
-              placeholder="Select subcategory"
-              onCreateNew={
-                selectedCategory
-                  ? async (name) => {
-                      const created = await categoriesApi.create({ name, parent_id: selectedCategory });
-                      const parentCat = categories.find((c) => c.id === selectedCategory)!;
-                      onCategoryCreated({
-                        ...parentCat,
-                        children: [...(parentCat.children ?? []), created],
-                      });
-                      return created;
-                    }
-                  : undefined
-              }
-            />
+        ) : (
+          /* Expense: category + subcategory */
+          <div className="flex gap-2">
+            <div className="flex-1">
+              <label className="block text-xs font-medium mb-1 text-muted-foreground">Category</label>
+              <CategoryCombobox
+                items={categories.map((c) => ({ id: c.id, name: c.name }))}
+                value={selectedCategory}
+                onChange={handleCategoryChange}
+                placeholder="Select category"
+                onCreateNew={async (name) => {
+                  const created = await categoriesApi.create({ name });
+                  onCategoryCreated({ ...created, children: [] });
+                  return created;
+                }}
+              />
+            </div>
+            <div className="flex-1">
+              <label className="block text-xs font-medium mb-1 text-muted-foreground">Subcategory</label>
+              <CategoryCombobox
+                items={allSubcategories}
+                value={selectedSubcategory}
+                onChange={handleSubcategoryChange}
+                placeholder="Select subcategory"
+                onCreateNew={
+                  selectedCategory
+                    ? async (name) => {
+                        const created = await categoriesApi.create({ name, parent_id: selectedCategory });
+                        const parentCat = categories.find((c) => c.id === selectedCategory)!;
+                        onCategoryCreated({
+                          ...parentCat,
+                          children: [...(parentCat.children ?? []), created],
+                        });
+                        return created;
+                      }
+                    : undefined
+                }
+              />
+            </div>
           </div>
-        </div>
+        )
       )}
 
       {/* Category display for non-editable approved/skipped items */}
-      {!showCategorySelectors && (displayCatName || expense.suggested_category_name) && (
-        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <span>
-            Category: {displayCatName || expense.suggested_category_name}
-            {(displaySubName || expense.suggested_subcategory_name) && (
-              <> / {displaySubName || expense.suggested_subcategory_name}</>
-            )}
-          </span>
-          {showEditCategoryButton && (
-            <button
-              type="button"
-              onClick={() => {
-                setSelectedCategory(expense.category_id ?? expense.suggested_category_id ?? 0);
-                setSelectedSubcategory(expense.subcategory_id ?? expense.suggested_subcategory_id ?? 0);
-                setIsEditingCategory(true);
-              }}
-              className="p-0.5 rounded hover:bg-secondary transition-colors"
-              title="Edit category"
-            >
-              <Pencil className="w-3 h-3" />
-            </button>
-          )}
-        </div>
+      {!showCategorySelectors && (
+        isIncome ? (
+          (() => {
+            const icName = expense.income_category_id
+              ? (incomeCategories.find((c) => c.id === expense.income_category_id)?.name ?? expense.income_category_name)
+              : expense.income_category_name;
+            return icName ? (
+              <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <span>Income category: {icName}</span>
+                {showEditCategoryButton && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedIncomeCategory(expense.income_category_id ?? expense.suggested_income_category_id ?? 0);
+                      setIsEditingCategory(true);
+                    }}
+                    className="p-0.5 rounded hover:bg-secondary transition-colors"
+                    title="Edit category"
+                  >
+                    <Pencil className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+            ) : null;
+          })()
+        ) : (
+          (displayCatName || expense.suggested_category_name) ? (
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <span>
+                Category: {displayCatName || expense.suggested_category_name}
+                {(displaySubName || expense.suggested_subcategory_name) && (
+                  <> / {displaySubName || expense.suggested_subcategory_name}</>
+                )}
+              </span>
+              {showEditCategoryButton && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedCategory(expense.category_id ?? expense.suggested_category_id ?? 0);
+                    setSelectedSubcategory(expense.subcategory_id ?? expense.suggested_subcategory_id ?? 0);
+                    setIsEditingCategory(true);
+                  }}
+                  className="p-0.5 rounded hover:bg-secondary transition-colors"
+                  title="Edit category"
+                >
+                  <Pencil className="w-3 h-3" />
+                </button>
+              )}
+            </div>
+          ) : null
+        )
       )}
 
       {/* Action buttons */}
@@ -269,7 +332,7 @@ export default function ExpenseCard({ expense, categories, onApprove, onDelete, 
         <div className="flex gap-2 pt-1">
           <button
             onClick={handleApprove}
-            disabled={!selectedCategory}
+            disabled={isIncome ? !selectedIncomeCategory : !selectedCategory}
             className="px-3 py-1.5 text-sm font-medium bg-green-600 text-white rounded-md hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Approve
@@ -280,12 +343,14 @@ export default function ExpenseCard({ expense, categories, onApprove, onDelete, 
           >
             Delete
           </button>
-          <button
-            onClick={() => onSplit(expense)}
-            className="px-3 py-1.5 text-sm font-medium border border-blue-500 text-blue-600 rounded-md hover:bg-blue-50 dark:hover:bg-blue-950"
-          >
-            Split
-          </button>
+          {!isIncome && (
+            <button
+              onClick={() => onSplit(expense)}
+              className="px-3 py-1.5 text-sm font-medium border border-blue-500 text-blue-600 rounded-md hover:bg-blue-50 dark:hover:bg-blue-950"
+            >
+              Split
+            </button>
+          )}
         </div>
       )}
 
@@ -307,15 +372,19 @@ export default function ExpenseCard({ expense, categories, onApprove, onDelete, 
         <div className="flex gap-2 pt-1">
           <button
             onClick={() => { setIsEditingCategory(false); handleApprove(); }}
-            disabled={!selectedCategory}
+            disabled={isIncome ? !selectedIncomeCategory : !selectedCategory}
             className="px-3 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Update Category
           </button>
           <button
             onClick={() => {
-              setSelectedCategory(expense.category_id ?? expense.suggested_category_id ?? 0);
-              setSelectedSubcategory(expense.subcategory_id ?? expense.suggested_subcategory_id ?? 0);
+              if (isIncome) {
+                setSelectedIncomeCategory(expense.income_category_id ?? expense.suggested_income_category_id ?? 0);
+              } else {
+                setSelectedCategory(expense.category_id ?? expense.suggested_category_id ?? 0);
+                setSelectedSubcategory(expense.subcategory_id ?? expense.suggested_subcategory_id ?? 0);
+              }
               setIsEditingCategory(false);
             }}
             className="px-3 py-1.5 text-sm font-medium bg-secondary text-secondary-foreground rounded-md hover:bg-secondary/80"

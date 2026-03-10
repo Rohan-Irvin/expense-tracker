@@ -6,6 +6,7 @@ export interface ParsedExpenseRow {
   date: string;       // YYYY-MM-DD
   description: string;
   amount: number;     // always positive
+  transaction_type: 'expense' | 'income';
 }
 
 // ---------------------------------------------------------------------------
@@ -277,6 +278,7 @@ export function applyColumnMap(
     const description = (row[columnMap.description] ?? '').trim();
 
     let amount: number;
+    let transaction_type: 'expense' | 'income';
 
     if (columnMap.amount_type === 'split') {
       // Strip everything except digits, dot and minus (handles $, £, spaces, commas, etc.)
@@ -286,21 +288,24 @@ export function applyColumnMap(
       const debitVal = debitStr ? parseFloat(debitStr) : 0;
       const creditVal = creditStr ? parseFloat(creditStr) : 0;
 
-      // Take whichever is non-empty / non-zero
-      amount = debitVal !== 0 ? Math.abs(debitVal) : Math.abs(creditVal);
+      // Debit column populated → money out (expense); credit column → money in (income)
+      transaction_type = debitVal !== 0 ? 'expense' : 'income';
+      amount = transaction_type === 'expense' ? Math.abs(debitVal) : Math.abs(creditVal);
     } else {
       // Single signed column — strip everything except digits, dot and minus
       const rawAmount = (row[columnMap.amount!] ?? '').replace(/[^0-9.\-]/g, '').trim();
       const parsed = parseFloat(rawAmount);
 
       if (columnMap.sign_convention === 'negative_is_debit') {
-        amount = Math.abs(parsed);
+        // negative = money out (expense), positive = money in (income)
+        transaction_type = parsed < 0 ? 'expense' : 'income';
       } else {
-        // positive_is_debit — value as-is (already positive)
-        amount = Math.abs(parsed);
+        // positive_is_debit (default): positive = money out (expense), negative = money in (income)
+        transaction_type = parsed > 0 ? 'expense' : 'income';
       }
+      amount = Math.abs(parsed);
     }
 
-    return { date, description, amount };
+    return { date, description, amount, transaction_type };
   });
 }

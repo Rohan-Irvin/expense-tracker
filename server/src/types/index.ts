@@ -55,6 +55,8 @@ export interface Expense {
   category_id: number | null;
   subcategory_id: number | null;
   split_parent_id: number | null;
+  transaction_type: 'expense' | 'income';
+  income_category_id: number | null;
   review_status: 'pending' | 'approved' | 'skipped' | 'split';
   note: string | null;
   created_at: string;
