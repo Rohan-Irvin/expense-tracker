@@ -127,30 +127,31 @@ export async function categorizeBatch(
     maxRetries: isOpenAI ? 2 : 0, // OpenAI is reliable; LM Studio retries cause hangs
   });
 
-  // Build the set of valid category IDs for response validation
-  const validCategoryIds = new Set<number>();
+  // Build subcategory → parent map and valid subcategory ID set
+  const subToParent = new Map<number, number>();
+  const validSubcategoryIds = new Set<number>();
   for (const cat of categoryTree) {
-    validCategoryIds.add(cat.id);
     for (const child of cat.children) {
-      validCategoryIds.add(child.id);
+      subToParent.set(child.id, cat.id);
+      validSubcategoryIds.add(child.id);
     }
   }
 
-  // Compact flat text category list — far fewer tokens than raw JSON
-  const categoryList = categoryTree
-    .map((cat) => {
-      const subs = cat.children.length
-        ? ` (subcategories: ${cat.children.map((c) => `${c.name}[id:${c.id}]`).join(', ')})`
-        : '';
-      return `[id:${cat.id}] ${cat.name}${subs}`;
-    })
+  // Flat subcategory list with parent context — LLM only picks subcategories;
+  // parent category is derived automatically from the chosen subcategory.
+  const subcategoryList = categoryTree
+    .flatMap((cat) =>
+      cat.children.map((child) => `[id:${child.id}] ${child.name} (${cat.name})`)
+    )
     .join('\n');
 
   let fewShotSection = '';
   if (fewShotExamples.length > 0) {
     const lines = fewShotExamples.map((ex) => {
-      const sub = ex.subcategory_name ? ` > ${ex.subcategory_name}` : '';
-      return `"${ex.description}" → ${ex.category_name}${sub}`;
+      const sub = ex.subcategory_name
+        ? `${ex.subcategory_name} (${ex.category_name})`
+        : ex.category_name;
+      return `"${ex.description}" → ${sub}`;
     });
     fewShotSection = `\nExamples:\n${lines.join('\n')}`;
   }
@@ -158,13 +159,13 @@ export async function categorizeBatch(
   // No response_format / json_schema — grammar-constrained decoding causes
   // LM Studio to hang indefinitely on some models. Plain text + a clear
   // prompt instruction is more reliable.
-  const systemPrompt = `Categorize expenses. For each, pick the best category (and subcategory if applicable) from the list below. Return ONLY a JSON object with a "results" array — no explanation, no markdown.
+  const systemPrompt = `Categorize expenses. For each, pick the best subcategory from the list below. The parent category is automatically derived from your choice. Return ONLY a JSON object with a "results" array — no explanation, no markdown.
 
-Categories:
-${categoryList}
+Subcategories (format: [id] Name (Parent Category)):
+${subcategoryList}
 ${fewShotSection}
 
-JSON format for each result: {"expense_id":<int>,"category_id":<int>,"subcategory_id":<int|null>,"confidence":"high"|"medium"|"low","reasoning":"<brief>"}`;
+JSON format for each result: {"expense_id":<int>,"subcategory_id":<int>,"confidence":"high"|"medium"|"low","reasoning":"<brief>"}`;
 
   const userMessage = JSON.stringify(expenses);
 
@@ -210,25 +211,20 @@ JSON format for each result: {"expense_id":<int>,"category_id":<int>,"subcategor
     return [];
   }
 
-  // Validate — only keep results with IDs that exist in the category tree
+  // Validate — only keep results whose subcategory_id exists in the tree;
+  // derive category_id automatically from the subcategory's parent.
   const validated: CategorizationResult[] = [];
   for (const result of parsed.results) {
-    if (!validCategoryIds.has(result.category_id)) {
-      console.warn(`[llm] Skipping expense ${result.expense_id}: invalid category_id ${result.category_id}`);
+    const subId = result.subcategory_id as number | null;
+    if (subId == null || !validSubcategoryIds.has(subId)) {
+      console.warn(`[llm] Skipping expense ${result.expense_id}: invalid subcategory_id ${subId}`);
       continue;
     }
-    if (
-      result.subcategory_id !== null &&
-      result.subcategory_id !== undefined &&
-      !validCategoryIds.has(result.subcategory_id)
-    ) {
-      console.warn(`[llm] Skipping expense ${result.expense_id}: invalid subcategory_id ${result.subcategory_id}`);
-      continue;
-    }
+    const category_id = subToParent.get(subId)!;
     validated.push({
       expense_id: result.expense_id,
-      category_id: result.category_id,
-      subcategory_id: result.subcategory_id ?? null,
+      category_id,
+      subcategory_id: subId,
       confidence: result.confidence,
       reasoning: result.reasoning,
     });

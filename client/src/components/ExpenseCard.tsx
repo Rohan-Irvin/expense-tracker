@@ -105,16 +105,6 @@ export default function ExpenseCard({ expense, categories, incomeCategories, onA
     [categories]
   );
 
-  const handleCategoryChange = (catId: number) => {
-    setSelectedCategory(catId);
-    // Reset subcategory only if it doesn't belong to the new parent
-    const newParent = categories.find((c) => c.id === catId);
-    const childIds = newParent?.children.map((c) => c.id) ?? [];
-    if (!childIds.includes(selectedSubcategory)) {
-      setSelectedSubcategory(0);
-    }
-  };
-
   const handleSubcategoryChange = (subId: number) => {
     setSelectedSubcategory(subId);
     if (subId !== 0) {
@@ -231,23 +221,17 @@ export default function ExpenseCard({ expense, categories, incomeCategories, onA
             />
           </div>
         ) : (
-          /* Expense: category + subcategory */
-          <div className="flex gap-2">
-            <div className="flex-1">
-              <label className="block text-xs font-medium mb-1 text-muted-foreground">Category</label>
-              <CategoryCombobox
-                items={categories.map((c) => ({ id: c.id, name: c.name }))}
-                value={selectedCategory}
-                onChange={handleCategoryChange}
-                placeholder="Select category"
-                onCreateNew={async (name) => {
-                  const created = await categoriesApi.create({ name });
-                  onCategoryCreated({ ...created, children: [] });
-                  return created;
-                }}
-              />
-            </div>
-            <div className="flex-1">
+          /* Expense: subcategory only — parent category is auto-derived */
+          <div className="space-y-1">
+            {selectedSubcategory !== 0 && (() => {
+              const sub = allSubcategories.find((s) => s.id === selectedSubcategory);
+              return sub ? (
+                <p className="text-xs text-muted-foreground">
+                  Category: <span className="font-medium">{sub.secondaryLabel}</span>
+                </p>
+              ) : null;
+            })()}
+            <div>
               <label className="block text-xs font-medium mb-1 text-muted-foreground">Subcategory</label>
               <CategoryCombobox
                 items={allSubcategories}
@@ -332,7 +316,7 @@ export default function ExpenseCard({ expense, categories, incomeCategories, onA
         <div className="flex gap-2 pt-1">
           <button
             onClick={handleApprove}
-            disabled={isIncome ? !selectedIncomeCategory : !selectedCategory}
+            disabled={isIncome ? !selectedIncomeCategory : !selectedSubcategory}
             className="px-3 py-1.5 text-sm font-medium bg-green-600 text-white rounded-md hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Approve
@@ -359,7 +343,7 @@ export default function ExpenseCard({ expense, categories, incomeCategories, onA
         <div className="flex gap-2 pt-1">
           <button
             onClick={handleApprove}
-            disabled={!selectedCategory}
+            disabled={!selectedSubcategory}
             className="px-3 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Update Category
@@ -372,7 +356,7 @@ export default function ExpenseCard({ expense, categories, incomeCategories, onA
         <div className="flex gap-2 pt-1">
           <button
             onClick={() => { setIsEditingCategory(false); handleApprove(); }}
-            disabled={isIncome ? !selectedIncomeCategory : !selectedCategory}
+            disabled={isIncome ? !selectedIncomeCategory : !selectedSubcategory}
             className="px-3 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Update Category

@@ -101,9 +101,13 @@ export default function QC() {
   const rangeStart = expenses.length > 0 ? (page - 1) * LIMIT + 1 : 0;
   const rangeEnd   = expenses.length > 0 ? rangeStart + expenses.length - 1 : 0;
 
-  const editSubcatOptions = useMemo(
-    () => categoriesList.find((c) => c.id === editCatId)?.children ?? [],
-    [editCatId, categoriesList]
+  // Flat list of all subcategories across every parent — for the edit select
+  const allSubcats = useMemo(
+    () =>
+      categoriesList.flatMap((c) =>
+        c.children.map((s) => ({ id: s.id, name: s.name, parent_id: c.id, parent_name: c.name }))
+      ),
+    [categoriesList]
   );
 
   const pageNumbers = useMemo(() => {
@@ -205,25 +209,31 @@ export default function QC() {
                           </td>
                           <td className="py-3 px-4" colSpan={2}>
                             <div className="flex flex-col gap-1">
-                              <select
-                                value={editCatId}
-                                onChange={(e) => { setEditCatId(parseInt(e.target.value, 10)); setEditSubcatId(0); }}
-                                className="text-xs border border-input rounded px-1.5 py-1 bg-background w-full"
-                              >
-                                <option value={0}>No category</option>
-                                {categoriesList.map((c) => (
-                                  <option key={c.id} value={c.id}>{c.name}</option>
-                                ))}
-                              </select>
+                              {editSubcatId !== 0 && (() => {
+                                const sub = allSubcats.find((s) => s.id === editSubcatId);
+                                return sub ? (
+                                  <span className="text-xs text-muted-foreground">
+                                    Category: <span className="font-medium">{sub.parent_name}</span>
+                                  </span>
+                                ) : null;
+                              })()}
                               <select
                                 value={editSubcatId}
-                                onChange={(e) => setEditSubcatId(parseInt(e.target.value, 10))}
-                                disabled={editSubcatOptions.length === 0}
-                                className="text-xs border border-input rounded px-1.5 py-1 bg-background w-full disabled:opacity-40"
+                                onChange={(e) => {
+                                  const subId = parseInt(e.target.value, 10);
+                                  setEditSubcatId(subId);
+                                  if (subId !== 0) {
+                                    const sub = allSubcats.find((s) => s.id === subId);
+                                    if (sub) setEditCatId(sub.parent_id);
+                                  } else {
+                                    setEditCatId(0);
+                                  }
+                                }}
+                                className="text-xs border border-input rounded px-1.5 py-1 bg-background w-full"
                               >
                                 <option value={0}>No subcategory</option>
-                                {editSubcatOptions.map((s) => (
-                                  <option key={s.id} value={s.id}>{s.name}</option>
+                                {allSubcats.map((s) => (
+                                  <option key={s.id} value={s.id}>{s.name} ({s.parent_name})</option>
                                 ))}
                               </select>
                             </div>
@@ -235,7 +245,7 @@ export default function QC() {
                             <div className="flex gap-1">
                               <button
                                 onClick={saveEdit}
-                                disabled={editSaving || editCatId === 0}
+                                disabled={editSaving || editSubcatId === 0}
                                 className="px-2 py-1 text-xs bg-primary text-primary-foreground rounded hover:bg-primary/90 disabled:opacity-50"
                               >
                                 {editSaving ? 'Saving…' : 'Save'}

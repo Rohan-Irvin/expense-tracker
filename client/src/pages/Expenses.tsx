@@ -197,9 +197,13 @@ export default function Expenses() {
     [categoryId, categoriesList]
   );
 
-  const editSubcatOptions = useMemo(
-    () => categoriesList.find((c) => c.id === editCatId)?.children ?? [],
-    [editCatId, categoriesList]
+  // Flat list of all subcategories across every parent — for the inline edit select
+  const allEditSubcats = useMemo(
+    () =>
+      categoriesList.flatMap((c) =>
+        c.children.map((s) => ({ id: s.id, name: s.name, parent_id: c.id, parent_name: c.name }))
+      ),
+    [categoriesList]
   );
 
   const allCurrentPageSelected =
@@ -553,25 +557,31 @@ export default function Expenses() {
                           </td>
                           <td className="py-3 px-4">
                             <div className="flex flex-col gap-1">
-                              <select
-                                value={editCatId}
-                                onChange={(e) => { setEditCatId(parseInt(e.target.value, 10)); setEditSubcatId(0); }}
-                                className="text-xs border border-input rounded px-1.5 py-1 bg-background w-full"
-                              >
-                                <option value={0}>No category</option>
-                                {categoriesList.map((c) => (
-                                  <option key={c.id} value={c.id}>{c.name}</option>
-                                ))}
-                              </select>
+                              {editSubcatId !== 0 && (() => {
+                                const sub = allEditSubcats.find((s) => s.id === editSubcatId);
+                                return sub ? (
+                                  <span className="text-xs text-muted-foreground">
+                                    ↳ {sub.parent_name}
+                                  </span>
+                                ) : null;
+                              })()}
                               <select
                                 value={editSubcatId}
-                                onChange={(e) => setEditSubcatId(parseInt(e.target.value, 10))}
-                                disabled={editSubcatOptions.length === 0}
-                                className="text-xs border border-input rounded px-1.5 py-1 bg-background w-full disabled:opacity-40"
+                                onChange={(e) => {
+                                  const subId = parseInt(e.target.value, 10);
+                                  setEditSubcatId(subId);
+                                  if (subId !== 0) {
+                                    const sub = allEditSubcats.find((s) => s.id === subId);
+                                    if (sub) setEditCatId(sub.parent_id);
+                                  } else {
+                                    setEditCatId(0);
+                                  }
+                                }}
+                                className="text-xs border border-input rounded px-1.5 py-1 bg-background w-full"
                               >
                                 <option value={0}>No subcategory</option>
-                                {editSubcatOptions.map((s) => (
-                                  <option key={s.id} value={s.id}>{s.name}</option>
+                                {allEditSubcats.map((s) => (
+                                  <option key={s.id} value={s.id}>{s.name} ({s.parent_name})</option>
                                 ))}
                               </select>
                             </div>
