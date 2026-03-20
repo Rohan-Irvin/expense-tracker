@@ -12,6 +12,7 @@ import Amazon from './pages/Amazon';
 import Trends from './pages/Trends';
 import ImportWizard from './pages/Import/ImportWizard';
 import ReviewBatch from './pages/ReviewBatch';
+import QC from './pages/QC';
 
 const router = createBrowserRouter([
   {
@@ -28,6 +29,7 @@ const router = createBrowserRouter([
       { path: 'import', element: <ImportWizard /> },
       { path: 'import/:batchId/review', element: <ReviewBatch /> },
       { path: 'trends', element: <Trends /> },
+      { path: 'qc', element: <QC /> },
     ],
   },
 ]);

@@ -86,7 +86,8 @@ export default function Expenses() {
   // ── Filter state ──────────────────────────────────────────────────────────
   const [dateFrom, setDateFrom] = useState(defaults.from);
   const [dateTo,   setDateTo]   = useState(defaults.to);
-  const [categoryId, setCategoryId] = useState('');
+  const [categoryId,    setCategoryId]    = useState('');
+  const [subcategoryId, setSubcategoryId] = useState('');
   const [accountId,  setAccountId]  = useState('');
   const [status,     setStatus]     = useState('');
   const [page, setPage] = useState(1);
@@ -135,7 +136,8 @@ export default function Expenses() {
       };
       if (dateFrom) params.date_from = dateFrom;
       if (dateTo)   params.date_to   = nextDay(dateTo); // exclusive upper bound
-      if (categoryId) params.category_id = categoryId;
+      if (categoryId)    params.category_id    = categoryId;
+      if (subcategoryId) params.subcategory_id = subcategoryId;
       if (accountId)  params.account_id  = accountId;
       if (status)     params.status      = status;
 
@@ -146,12 +148,15 @@ export default function Expenses() {
     } finally {
       setLoading(false);
     }
-  }, [dateFrom, dateTo, categoryId, accountId, status, page]);
+  }, [dateFrom, dateTo, categoryId, subcategoryId, accountId, status, page]);
 
   useEffect(() => { fetchExpenses(); }, [fetchExpenses]);
 
+  // Reset subcategory when category changes
+  useEffect(() => { setSubcategoryId(''); }, [categoryId]);
+
   // Reset page to 1 when any filter changes
-  useEffect(() => { setPage(1); }, [dateFrom, dateTo, categoryId, accountId, status]);
+  useEffect(() => { setPage(1); }, [dateFrom, dateTo, categoryId, subcategoryId, accountId, status]);
 
   // Clear selection when page changes
   useEffect(() => {
@@ -186,6 +191,11 @@ export default function Expenses() {
     }
     return pages;
   }, [page, totalPages]);
+
+  const filterSubcatOptions = useMemo(
+    () => categoriesList.find((c) => String(c.id) === categoryId)?.children ?? [],
+    [categoryId, categoriesList]
+  );
 
   const editSubcatOptions = useMemo(
     () => categoriesList.find((c) => c.id === editCatId)?.children ?? [],
@@ -271,6 +281,49 @@ export default function Expenses() {
     }
   };
 
+  const handleExportCsv = async () => {
+    try {
+      const params: Record<string, string> = { page: '1', limit: '100000' };
+      if (dateFrom) params.date_from = dateFrom;
+      if (dateTo)   params.date_to   = nextDay(dateTo);
+      if (categoryId)    params.category_id    = categoryId;
+      if (subcategoryId) params.subcategory_id = subcategoryId;
+      if (accountId)  params.account_id  = accountId;
+      if (status)     params.status      = status;
+
+      const result = await expensesApi.list(params) as ExpensesResponse;
+      const rows = result.expenses;
+
+      const header = ['Date', 'Description', 'Category', 'Subcategory', 'Amount AUD', 'Original Amount', 'Currency', 'Status'];
+      const csvRows = rows.map((e) => [
+        e.date,
+        e.description,
+        e.category_name ?? '',
+        e.subcategory_name ?? '',
+        e.amount_aud.toFixed(2),
+        e.amount_original != null ? e.amount_original.toFixed(2) : e.amount_aud.toFixed(2),
+        e.currency_original ?? 'AUD',
+        e.review_status,
+      ]);
+
+      const csvContent = [header, ...csvRows]
+        .map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+        .join('\n');
+
+      const from = dateFrom || 'all';
+      const to   = dateTo   || 'all';
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href     = url;
+      a.download = `expenses_${from}_${to}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      alert('Export failed: ' + err.message);
+    }
+  };
+
   // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div>
@@ -282,6 +335,13 @@ export default function Expenses() {
             {total} expense{total !== 1 ? 's' : ''} found
           </p>
         </div>
+        <button
+          onClick={handleExportCsv}
+          disabled={total === 0}
+          className="px-4 py-2 text-sm border border-input rounded-md hover:bg-muted transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          Export CSV
+        </button>
       </div>
 
       {/* Filters */}
@@ -304,6 +364,16 @@ export default function Expenses() {
             className="px-3 py-2 border border-input rounded-md bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring"
           />
         </div>
+        {/* Year quick-select */}
+        {[new Date().getFullYear() - 1, new Date().getFullYear()].map((yr) => (
+          <button
+            key={yr}
+            onClick={() => { setDateFrom(`${yr}-01-01`); setDateTo(`${yr}-12-31`); }}
+            className="px-3 py-2 text-sm border border-input rounded-md hover:bg-muted transition-colors"
+          >
+            {yr}
+          </button>
+        ))}
         <div>
           <label className="block text-xs font-medium text-muted-foreground mb-1">Category</label>
           <select
@@ -314,6 +384,20 @@ export default function Expenses() {
             <option value="">All Categories</option>
             {categoriesList.map((cat) => (
               <option key={cat.id} value={cat.id}>{cat.name}</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-muted-foreground mb-1">Subcategory</label>
+          <select
+            value={subcategoryId}
+            onChange={(e) => setSubcategoryId(e.target.value)}
+            disabled={filterSubcatOptions.length === 0}
+            className="px-3 py-2 border border-input rounded-md bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <option value="">All Subcategories</option>
+            {filterSubcatOptions.map((sub) => (
+              <option key={sub.id} value={sub.id}>{sub.name}</option>
             ))}
           </select>
         </div>

@@ -34,7 +34,7 @@ router.get('/summary', async (req: Request, res: Response) => {
     const expensesByMonth = await db.execute({
       sql: `SELECT strftime('%Y-%m', date) as month, SUM(amount_aud) as total
             FROM expenses
-            WHERE review_status IN ('approved', 'skipped') AND split_parent_id IS NULL
+            WHERE review_status IN ('approved', 'skipped')
               AND date >= ? AND date < ?
             GROUP BY month`,
       args: [dateFrom, dateTo],
@@ -95,7 +95,7 @@ router.get('/summary', async (req: Request, res: Response) => {
             FROM expenses e
             LEFT JOIN categories c1 ON e.category_id = c1.id
             LEFT JOIN categories c2 ON e.subcategory_id = c2.id
-            WHERE e.review_status IN ('approved', 'skipped') AND e.split_parent_id IS NULL
+            WHERE e.review_status IN ('approved', 'skipped')
               AND e.date >= ? AND e.date < ?
             GROUP BY e.category_id, e.subcategory_id
             ORDER BY total_aud DESC`,
@@ -209,14 +209,37 @@ router.get('/trends', async (req: Request, res: Response) => {
                      SUM(e.amount_aud) as total_aud
               FROM expenses e
               WHERE e.review_status IN ('approved', 'skipped')
-                AND e.split_parent_id IS NULL
-                AND e.date >= ? AND e.date < ?
+                  AND e.date >= ? AND e.date < ?
                 AND e.category_id IN (${catIds.map(() => '?').join(',')})
               GROUP BY month, e.category_id
               ORDER BY month`,
         args: [dateFrom, dateTo, ...catIds],
       });
       for (const row of catResult.rows as unknown as DataRow[]) {
+        allRows.push({ month: row.month, series_key: row.series_key, total_aud: Math.round(row.total_aud * 100) / 100 });
+      }
+    }
+
+    // Query 1b: expenses in selected categories whose subcategory is null OR doesn't belong
+    // to that category (catches both truly uncategorized and category/subcategory mismatches)
+    if (catIds.length > 0) {
+      const uncatResult = await db.execute({
+        sql: `SELECT strftime('%Y-%m', e.date) as month,
+                     'uncat:' || e.category_id as series_key,
+                     SUM(e.amount_aud) as total_aud
+              FROM expenses e
+              WHERE e.review_status IN ('approved', 'skipped')
+                  AND e.date >= ? AND e.date < ?
+                AND e.category_id IN (${catIds.map(() => '?').join(',')})
+                AND (e.subcategory_id IS NULL
+                     OR e.subcategory_id NOT IN (
+                       SELECT id FROM categories WHERE parent_id = e.category_id
+                     ))
+              GROUP BY month, e.category_id
+              ORDER BY month`,
+        args: [dateFrom, dateTo, ...catIds],
+      });
+      for (const row of uncatResult.rows as unknown as DataRow[]) {
         allRows.push({ month: row.month, series_key: row.series_key, total_aud: Math.round(row.total_aud * 100) / 100 });
       }
     }
@@ -229,8 +252,7 @@ router.get('/trends', async (req: Request, res: Response) => {
                      SUM(e.amount_aud) as total_aud
               FROM expenses e
               WHERE e.review_status IN ('approved', 'skipped')
-                AND e.split_parent_id IS NULL
-                AND e.date >= ? AND e.date < ?
+                  AND e.date >= ? AND e.date < ?
                 AND e.subcategory_id IN (${subIds.map(() => '?').join(',')})
               GROUP BY month, e.subcategory_id
               ORDER BY month`,
@@ -242,7 +264,7 @@ router.get('/trends', async (req: Request, res: Response) => {
     }
 
     // Build series metadata (name lookups) preserving the user's selection order
-    const seriesMap = new Map<string, { key: string; name: string; type: 'category' | 'subcategory' }>();
+    const seriesMap = new Map<string, { key: string; name: string; type: 'category' | 'subcategory' | 'uncategorized' }>();
     if (catIds.length > 0) {
       const catNames = await db.execute({
         sql: `SELECT id, name FROM categories WHERE id IN (${catIds.map(() => '?').join(',')})`,
@@ -250,6 +272,7 @@ router.get('/trends', async (req: Request, res: Response) => {
       });
       for (const row of catNames.rows as unknown as { id: number; name: string }[]) {
         seriesMap.set(`cat:${row.id}`, { key: `cat:${row.id}`, name: row.name, type: 'category' });
+        seriesMap.set(`uncat:${row.id}`, { key: `uncat:${row.id}`, name: `${row.name} › Uncategorized`, type: 'uncategorized' });
       }
     }
     if (subIds.length > 0) {
@@ -266,10 +289,18 @@ router.get('/trends', async (req: Request, res: Response) => {
       }
     }
 
-    // Return series in the order the user selected them
-    const series = parsedItems
-      .map((i) => seriesMap.get(`${i.type}:${i.id}`))
-      .filter(Boolean);
+    // Return series in the user's selection order; inject uncat rows after each cat (only if data exists)
+    const seriesKeysWithData = new Set(allRows.map((r) => r.series_key));
+    const series: { key: string; name: string; type: string }[] = [];
+    for (const item of parsedItems) {
+      const s = seriesMap.get(`${item.type}:${item.id}`);
+      if (s) series.push(s);
+      if (item.type === 'cat') {
+        const uncatKey = `uncat:${item.id}`;
+        const uncat = seriesMap.get(uncatKey);
+        if (uncat && seriesKeysWithData.has(uncatKey)) series.push(uncat);
+      }
+    }
 
     res.json({ months, series, data: allRows });
   } catch (err) {

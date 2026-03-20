@@ -1,22 +1,26 @@
 import { Outlet, NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, Tags, Wallet, Upload, DollarSign,
-  Receipt, Settings, ShoppingCart, BookOpen, TrendingUp
+  Receipt, Settings, ShoppingCart, BookOpen, TrendingUp, ShieldAlert
 } from 'lucide-react';
-
-const navItems = [
-  { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
-  { to: '/categories', icon: Tags, label: 'Categories' },
-  { to: '/accounts', icon: Wallet, label: 'Accounts' },
-  { to: '/import', icon: Upload, label: 'Import' },
-  { to: '/expenses', icon: Receipt, label: 'Expenses' },
-  { to: '/income', icon: DollarSign, label: 'Income' },
-  { to: '/trends', icon: TrendingUp, label: 'Trends' },
-  { to: '/amazon', icon: ShoppingCart, label: 'Amazon' },
-  { to: '/settings', icon: Settings, label: 'Settings' },
-];
+import { useQCCount } from '@/context/QCCountContext';
 
 export default function App() {
+  const { count: qcCount } = useQCCount();
+
+  const navItems = [
+    { to: '/', icon: LayoutDashboard, label: 'Cashflow' },
+    { to: '/categories', icon: Tags, label: 'Categories' },
+    { to: '/accounts', icon: Wallet, label: 'Accounts' },
+    { to: '/import', icon: Upload, label: 'Import' },
+    { to: '/expenses', icon: Receipt, label: 'Expenses' },
+    { to: '/income', icon: DollarSign, label: 'Income' },
+    { to: '/trends', icon: TrendingUp, label: 'Trends' },
+    { to: '/amazon', icon: ShoppingCart, label: 'Amazon' },
+    { to: '/qc', icon: ShieldAlert, label: 'QC', badge: qcCount > 0 ? qcCount : undefined },
+    { to: '/settings', icon: Settings, label: 'Settings' },
+  ];
+
   return (
     <div className="flex h-screen bg-background">
       {/* Sidebar */}
@@ -28,7 +32,7 @@ export default function App() {
           </h1>
         </div>
         <nav className="flex-1 p-2 space-y-1">
-          {navItems.map(({ to, icon: Icon, label }) => (
+          {navItems.map(({ to, icon: Icon, label, badge }) => (
             <NavLink
               key={to}
               to={to}
@@ -42,7 +46,12 @@ export default function App() {
               }
             >
               <Icon className="w-4 h-4" />
-              {label}
+              <span className="flex-1">{label}</span>
+              {badge !== undefined && (
+                <span className="ml-auto inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1 text-xs font-bold rounded-full bg-red-500 text-white">
+                  {badge > 99 ? '99+' : badge}
+                </span>
+              )}
             </NavLink>
           ))}
         </nav>

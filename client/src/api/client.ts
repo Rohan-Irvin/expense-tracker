@@ -68,6 +68,11 @@ export const expenses = {
     const qs = params ? '?' + new URLSearchParams(params).toString() : '';
     return request<any>(`/expenses${qs}`);
   },
+  qcCount: () => request<{ count: number }>('/expenses/qc/count'),
+  qcList: (params?: Record<string, string>) => {
+    const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+    return request<any>(`/expenses/qc${qs}`);
+  },
   approve: (id: number, data: { category_id: number; subcategory_id?: number }) =>
     request<any>(`/expenses/${id}/approve`, { method: 'PATCH', body: JSON.stringify(data) }),
   skip: (id: number) => request<any>(`/expenses/${id}/skip`, { method: 'PATCH' }),
@@ -82,7 +87,10 @@ export const expenses = {
 
 // Income
 export const income = {
-  list: () => request<any[]>('/income'),
+  list: (params?: Record<string, string>) => {
+    const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+    return request<any[]>(`/income${qs}`);
+  },
   create: (data: any) => request<any>('/income', { method: 'POST', body: JSON.stringify(data) }),
   update: (id: number, data: any) => request<any>(`/income/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   delete: (id: number) => request<void>(`/income/${id}`, { method: 'DELETE' }),

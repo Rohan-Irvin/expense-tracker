@@ -44,14 +44,24 @@ const upload = multer({ storage: multer.memoryStorage() });
 // GET /api/income — list all income entries
 // ---------------------------------------------------------------------------
 
-router.get('/', async (_req: Request, res: Response) => {
+router.get('/', async (req: Request, res: Response) => {
   try {
+    const { date_from, date_to } = req.query;
+    const conditions: string[] = [];
+    const args: any[] = [];
+
+    if (date_from) { conditions.push('ie.date >= ?'); args.push(date_from); }
+    if (date_to)   { conditions.push('ie.date < ?');  args.push(date_to); }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
     const result = await db.execute({
       sql: `SELECT ie.*, ic.name as income_category_name
             FROM income_entries ie
             LEFT JOIN income_categories ic ON ie.income_category_id = ic.id
+            ${whereClause}
             ORDER BY ie.date DESC`,
-      args: [],
+      args,
     });
 
     res.json(result.rows);

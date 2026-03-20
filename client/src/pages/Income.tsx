@@ -11,6 +11,18 @@ function todayISO(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+function getDefaultDateRange(): { from: string; to: string } {
+  const now = new Date();
+  const y = now.getFullYear();
+  return { from: `${y}-01-01`, to: todayISO() };
+}
+
+function nextDay(dateStr: string): string {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dt = new Date(y, m - 1, d + 1);
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+}
+
 function formatDate(iso: string): string {
   const d = new Date(iso + 'T00:00:00');
   return d.toLocaleDateString('en-AU', { day: '2-digit', month: 'short', year: 'numeric' });
@@ -38,6 +50,11 @@ interface IncomeColumnMap {
 // ---------- component ----------
 
 export default function Income() {
+  // Date filter
+  const defaults = getDefaultDateRange();
+  const [dateFrom, setDateFrom] = useState(defaults.from);
+  const [dateTo,   setDateTo]   = useState(defaults.to);
+
   // Income data
   const [entries, setEntries] = useState<IncomeEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -105,9 +122,13 @@ export default function Income() {
 
   // ---------- load data ----------
 
-  const loadEntries = async () => {
+  const loadEntries = useCallback(async () => {
+    setLoading(true);
     try {
-      const data = await income.list();
+      const params: Record<string, string> = {};
+      if (dateFrom) params.date_from = dateFrom;
+      if (dateTo)   params.date_to   = nextDay(dateTo);
+      const data = await income.list(params);
       setEntries(data);
       setError(null);
     } catch (err: any) {
@@ -115,7 +136,7 @@ export default function Income() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [dateFrom, dateTo]);
 
   const loadCategories = async () => {
     try {
@@ -128,26 +149,18 @@ export default function Income() {
 
   useEffect(() => {
     loadEntries();
+  }, [loadEntries]);
+
+  useEffect(() => {
     loadCategories();
   }, []);
 
   // ---------- summary calculations ----------
 
-  const { monthTotal, yearTotal } = useMemo(() => {
-    const now = new Date();
-    const currentMonth = now.getMonth();
-    const currentYear = now.getFullYear();
-    let month = 0;
-    let year = 0;
-    for (const entry of entries) {
-      const d = new Date(entry.date + 'T00:00:00');
-      if (d.getFullYear() === currentYear) {
-        year += entry.amount_aud;
-        if (d.getMonth() === currentMonth) month += entry.amount_aud;
-      }
-    }
-    return { monthTotal: month, yearTotal: year };
-  }, [entries]);
+  const periodTotal = useMemo(
+    () => entries.reduce((sum, e) => sum + e.amount_aud, 0),
+    [entries]
+  );
 
   // ---------- income category handlers ----------
 
@@ -477,6 +490,37 @@ export default function Income() {
       {/* Header */}
       <h1 className="text-2xl font-bold">Income</h1>
 
+      {/* Date filters */}
+      <div className="flex flex-wrap items-end gap-3 mt-4">
+        <div>
+          <label className="block text-xs font-medium text-muted-foreground mb-1">From</label>
+          <input
+            type="date"
+            value={dateFrom}
+            onChange={(e) => setDateFrom(e.target.value)}
+            className="px-3 py-2 border border-input rounded-md bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+          />
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-muted-foreground mb-1">To</label>
+          <input
+            type="date"
+            value={dateTo}
+            onChange={(e) => setDateTo(e.target.value)}
+            className="px-3 py-2 border border-input rounded-md bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+          />
+        </div>
+        {[new Date().getFullYear() - 1, new Date().getFullYear()].map((yr) => (
+          <button
+            key={yr}
+            onClick={() => { setDateFrom(`${yr}-01-01`); setDateTo(`${yr}-12-31`); }}
+            className="px-3 py-2 text-sm border border-input rounded-md hover:bg-muted transition-colors"
+          >
+            {yr}
+          </button>
+        ))}
+      </div>
+
       {/* Action buttons */}
       <div className="flex flex-wrap gap-2 mt-4">
         <button
@@ -691,15 +735,11 @@ export default function Income() {
         </div>
       )}
 
-      {/* Summary cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-6">
-        <div className="bg-card border rounded-lg p-4">
-          <p className="text-sm text-muted-foreground">Income This Month</p>
-          <p className="text-2xl font-bold mt-1">{formatCurrency(monthTotal)}</p>
-        </div>
-        <div className="bg-card border rounded-lg p-4">
-          <p className="text-sm text-muted-foreground">Income This Year</p>
-          <p className="text-2xl font-bold mt-1">{formatCurrency(yearTotal)}</p>
+      {/* Summary card */}
+      <div className="mt-6">
+        <div className="bg-card border rounded-lg p-4 inline-block min-w-[200px]">
+          <p className="text-sm text-muted-foreground">Total Income ({entries.length} entries)</p>
+          <p className="text-2xl font-bold mt-1">{formatCurrency(periodTotal)}</p>
         </div>
       </div>
 

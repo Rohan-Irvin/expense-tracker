@@ -116,6 +116,64 @@ router.get('/', async (req: Request, res: Response) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/expenses/qc/count — count of categorization quality issues
+// ---------------------------------------------------------------------------
+
+const QC_CONDITION = `
+  e.review_status IN ('approved', 'skipped')
+  AND e.split_parent_id IS NULL
+  AND (
+    e.category_id IS NULL
+    OR (e.subcategory_id IS NOT NULL AND e.subcategory_id NOT IN (
+      SELECT id FROM categories WHERE parent_id = e.category_id
+    ))
+  )`;
+
+router.get('/qc/count', async (_req: Request, res: Response) => {
+  try {
+    const result = await db.execute({ sql: `SELECT COUNT(*) as count FROM expenses e WHERE ${QC_CONDITION}`, args: [] });
+    res.json({ count: Number((result.rows[0] as unknown as { count: number }).count) });
+  } catch (err) {
+    console.error('Error fetching QC count:', err);
+    res.status(500).json({ error: 'Failed to fetch QC count' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/expenses/qc — paginated list of categorization quality issues
+// ---------------------------------------------------------------------------
+
+router.get('/qc', async (req: Request, res: Response) => {
+  try {
+    const page  = parseInt(req.query.page  as string, 10) || 1;
+    const limit = parseInt(req.query.limit as string, 10) || 50;
+    const offset = (page - 1) * limit;
+
+    const countResult = await db.execute({ sql: `SELECT COUNT(*) as total FROM expenses e WHERE ${QC_CONDITION}`, args: [] });
+    const total = Number((countResult.rows[0] as unknown as { total: number }).total);
+
+    const expensesResult = await db.execute({
+      sql: `SELECT e.*,
+                   c1.name as category_name,
+                   c2.name as subcategory_name,
+                   CASE WHEN e.category_id IS NULL THEN 'uncategorized' ELSE 'mismatch' END as issue_type
+            FROM expenses e
+            LEFT JOIN categories c1 ON e.category_id = c1.id
+            LEFT JOIN categories c2 ON e.subcategory_id = c2.id
+            WHERE ${QC_CONDITION}
+            ORDER BY e.date DESC, e.id DESC
+            LIMIT ? OFFSET ?`,
+      args: [limit, offset],
+    });
+
+    res.json({ expenses: expensesResult.rows, total, page, limit, totalPages: Math.ceil(total / limit) });
+  } catch (err) {
+    console.error('Error fetching QC expenses:', err);
+    res.status(500).json({ error: 'Failed to fetch QC expenses' });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // PATCH /api/expenses/:id — update editable fields (date, description, category)
 // ---------------------------------------------------------------------------
 

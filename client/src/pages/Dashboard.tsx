@@ -377,7 +377,7 @@ export default function Dashboard() {
   if (loading && !data) {
     return (
       <div>
-        <h1 className="text-2xl font-bold">Dashboard</h1>
+        <h1 className="text-2xl font-bold">Cashflow</h1>
         <p className="text-muted-foreground mt-4">Loading dashboard...</p>
       </div>
     );
@@ -385,10 +385,10 @@ export default function Dashboard() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold">Dashboard</h1>
+      <h1 className="text-2xl font-bold">Cashflow</h1>
 
       {/* Date Range Selector */}
-      <div className="flex items-end gap-3 mt-6">
+      <div className="flex flex-wrap items-end gap-3 mt-6">
         <div>
           <label className="block text-sm font-medium mb-1">From</label>
           <input
@@ -407,6 +407,16 @@ export default function Dashboard() {
             className="px-3 py-2 text-sm border border-input rounded-md bg-background"
           />
         </div>
+        {/* Year quick-select */}
+        {[new Date().getFullYear() - 1, new Date().getFullYear()].map((yr) => (
+          <button
+            key={yr}
+            onClick={() => { setFromMonth(`${yr}-01`); setToMonth(`${yr}-12`); }}
+            className="px-3 py-2 text-sm border border-input rounded-md hover:bg-muted transition-colors"
+          >
+            {yr}
+          </button>
+        ))}
         <button
           onClick={handleApply}
           disabled={loading}
