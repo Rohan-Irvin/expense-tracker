@@ -10,6 +10,8 @@ const OPENAI_MODELS = [
   { value: 'gpt-5-mini', label: 'GPT-5 mini' },
   { value: 'gpt-5-nano', label: 'GPT-5 nano' },
   { value: 'gpt-5.4', label: 'GPT-5.4' },
+  { value: 'gpt-5.4-mini', label: 'GPT-5.4 mini' },
+  { value: 'gpt-5.4-nano', label: 'GPT-5.4 nano (fastest, cheapest)' },
 ];
 
 const defaultForm: AppSettings = {
