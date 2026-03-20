@@ -46,12 +46,13 @@ const upload = multer({ storage: multer.memoryStorage() });
 
 router.get('/', async (req: Request, res: Response) => {
   try {
-    const { date_from, date_to } = req.query;
+    const { date_from, date_to, income_category_id } = req.query;
     const conditions: string[] = [];
     const args: any[] = [];
 
     if (date_from) { conditions.push('ie.date >= ?'); args.push(date_from); }
     if (date_to)   { conditions.push('ie.date < ?');  args.push(date_to); }
+    if (income_category_id) { conditions.push('ie.income_category_id = ?'); args.push(income_category_id); }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 

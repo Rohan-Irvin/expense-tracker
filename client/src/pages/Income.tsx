@@ -50,10 +50,11 @@ interface IncomeColumnMap {
 // ---------- component ----------
 
 export default function Income() {
-  // Date filter
+  // Date + category filters
   const defaults = getDefaultDateRange();
-  const [dateFrom, setDateFrom] = useState(defaults.from);
-  const [dateTo,   setDateTo]   = useState(defaults.to);
+  const [dateFrom,        setDateFrom]        = useState(defaults.from);
+  const [dateTo,          setDateTo]          = useState(defaults.to);
+  const [categoryFilter,  setCategoryFilter]  = useState('');
 
   // Income data
   const [entries, setEntries] = useState<IncomeEntry[]>([]);
@@ -126,8 +127,9 @@ export default function Income() {
     setLoading(true);
     try {
       const params: Record<string, string> = {};
-      if (dateFrom) params.date_from = dateFrom;
-      if (dateTo)   params.date_to   = nextDay(dateTo);
+      if (dateFrom)       params.date_from          = dateFrom;
+      if (dateTo)         params.date_to            = nextDay(dateTo);
+      if (categoryFilter) params.income_category_id = categoryFilter;
       const data = await income.list(params);
       setEntries(data);
       setError(null);
@@ -136,7 +138,7 @@ export default function Income() {
     } finally {
       setLoading(false);
     }
-  }, [dateFrom, dateTo]);
+  }, [dateFrom, dateTo, categoryFilter]);
 
   const loadCategories = async () => {
     try {
@@ -385,6 +387,35 @@ export default function Income() {
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
+  // ---------- CSV export ----------
+
+  const handleExportCsv = () => {
+    if (entries.length === 0) return;
+    const header = ['Date', 'Source', 'Category', 'Amount AUD', 'Original Amount', 'Currency', 'Type', 'Note'];
+    const csvRows = entries.map((e) => [
+      e.date,
+      e.source,
+      (e as any).income_category_name ?? '',
+      e.amount_aud.toFixed(2),
+      e.amount_original.toFixed(2),
+      e.currency_original,
+      e.entry_type || '',
+      (e as any).note ?? '',
+    ]);
+    const csvContent = [header, ...csvRows]
+      .map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+      .join('\n');
+    const from = dateFrom || 'all';
+    const to   = dateTo   || 'all';
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = `income_${from}_${to}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   // ---------- category name lookup ----------
 
   const catNameById = useMemo(() => {
@@ -466,7 +497,7 @@ export default function Income() {
 
   // ---------- render ----------
 
-  if (loading) {
+  if (loading && entries.length === 0) {
     return (
       <div>
         <h1 className="text-2xl font-bold">Income</h1>
@@ -480,7 +511,7 @@ export default function Income() {
       <div>
         <h1 className="text-2xl font-bold">Income</h1>
         <p className="text-destructive mt-4">{error}</p>
-        <button onClick={() => { setLoading(true); loadEntries(); }} className="mt-2 px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90">Retry</button>
+        <button onClick={() => loadEntries()} className="mt-2 px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90">Retry</button>
       </div>
     );
   }
@@ -488,10 +519,24 @@ export default function Income() {
   return (
     <div>
       {/* Header */}
-      <h1 className="text-2xl font-bold">Income</h1>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold">Income</h1>
+          <p className="text-sm text-muted-foreground mt-1">
+            {entries.length} entr{entries.length !== 1 ? 'ies' : 'y'} found
+          </p>
+        </div>
+        <button
+          onClick={handleExportCsv}
+          disabled={entries.length === 0}
+          className="px-4 py-2 text-sm border border-input rounded-md hover:bg-muted transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          Export CSV
+        </button>
+      </div>
 
-      {/* Date filters */}
-      <div className="flex flex-wrap items-end gap-3 mt-4">
+      {/* Filters */}
+      <div className="flex flex-wrap items-end gap-3 mt-6">
         <div>
           <label className="block text-xs font-medium text-muted-foreground mb-1">From</label>
           <input
@@ -519,6 +564,19 @@ export default function Income() {
             {yr}
           </button>
         ))}
+        <div>
+          <label className="block text-xs font-medium text-muted-foreground mb-1">Category</label>
+          <select
+            value={categoryFilter}
+            onChange={(e) => setCategoryFilter(e.target.value)}
+            className="px-3 py-2 border border-input rounded-md bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+          >
+            <option value="">All Categories</option>
+            {incomeCategories.map((cat) => (
+              <option key={cat.id} value={cat.id}>{cat.name}</option>
+            ))}
+          </select>
+        </div>
       </div>
 
       {/* Action buttons */}
