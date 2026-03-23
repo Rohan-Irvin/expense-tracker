@@ -83,6 +83,19 @@ router.get('/', async (req: Request, res: Response) => {
       ? `WHERE ${conditions.join(' AND ')}`
       : '';
 
+    // Validate sort params against a whitelist to prevent SQL injection
+    const SORT_COLUMNS: Record<string, string> = {
+      date:          'e.date',
+      description:   'e.description',
+      category_name: 'c1.name',
+      amount_aud:    'e.amount_aud',
+      review_status: 'e.review_status',
+    };
+    const sortByParam  = typeof req.query.sort_by  === 'string' ? req.query.sort_by  : 'date';
+    const sortDirParam = req.query.sort_dir === 'asc' ? 'ASC' : 'DESC';
+    const sortCol      = SORT_COLUMNS[sortByParam] ?? 'e.date';
+    const orderClause  = `ORDER BY ${sortCol} ${sortDirParam}, e.id ${sortDirParam}`;
+
     // Get total count for pagination
     const countResult = await db.execute({
       sql: `SELECT COUNT(*) as total FROM expenses e ${whereClause}`,
@@ -97,7 +110,7 @@ router.get('/', async (req: Request, res: Response) => {
             LEFT JOIN categories c1 ON e.category_id = c1.id
             LEFT JOIN categories c2 ON e.subcategory_id = c2.id
             ${whereClause}
-            ORDER BY e.date DESC, e.id DESC
+            ${orderClause}
             LIMIT ? OFFSET ?`,
       args: [...args, limit, offset],
     });

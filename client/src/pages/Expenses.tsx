@@ -15,6 +15,8 @@ interface ExpensesResponse {
   totalPages: number;
 }
 
+type SortKey = 'date' | 'description' | 'category_name' | 'amount_aud' | 'review_status';
+
 const STATUS_OPTIONS = [
   { value: '', label: 'All Statuses' },
   { value: 'approved', label: 'Approved' },
@@ -90,6 +92,8 @@ export default function Expenses() {
   const [subcategoryId, setSubcategoryId] = useState('');
   const [accountId,  setAccountId]  = useState('');
   const [status,     setStatus]     = useState('');
+  const [sortBy,  setSortBy]  = useState<SortKey>('date');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [page, setPage] = useState(1);
 
   // ── Remote data ───────────────────────────────────────────────────────────
@@ -140,6 +144,8 @@ export default function Expenses() {
       if (subcategoryId) params.subcategory_id = subcategoryId;
       if (accountId)  params.account_id  = accountId;
       if (status)     params.status      = status;
+      params.sort_by  = sortBy;
+      params.sort_dir = sortDir;
 
       const result = await expensesApi.list(params) as ExpensesResponse;
       setData(result);
@@ -148,15 +154,15 @@ export default function Expenses() {
     } finally {
       setLoading(false);
     }
-  }, [dateFrom, dateTo, categoryId, subcategoryId, accountId, status, page]);
+  }, [dateFrom, dateTo, categoryId, subcategoryId, accountId, status, sortBy, sortDir, page]);
 
   useEffect(() => { fetchExpenses(); }, [fetchExpenses]);
 
   // Reset subcategory when category changes
   useEffect(() => { setSubcategoryId(''); }, [categoryId]);
 
-  // Reset page to 1 when any filter changes
-  useEffect(() => { setPage(1); }, [dateFrom, dateTo, categoryId, subcategoryId, accountId, status]);
+  // Reset page to 1 when any filter or sort changes
+  useEffect(() => { setPage(1); }, [dateFrom, dateTo, categoryId, subcategoryId, accountId, status, sortBy, sortDir]);
 
   // Clear selection when page changes
   useEffect(() => {
@@ -282,6 +288,15 @@ export default function Expenses() {
       alert(err.message);
     } finally {
       setBulkDeleting(false);
+    }
+  };
+
+  const handleSort = (key: SortKey) => {
+    if (sortBy === key) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortBy(key);
+      setSortDir('asc');
     }
   };
 
@@ -520,11 +535,27 @@ export default function Expenses() {
                         title="Select all on this page"
                       />
                     </th>
-                    <th className="text-left py-3 px-4 font-medium text-muted-foreground bg-muted/50 w-32">Date</th>
-                    <th className="text-left py-3 px-4 font-medium text-muted-foreground bg-muted/50">Description</th>
-                    <th className="text-left py-3 px-4 font-medium text-muted-foreground bg-muted/50 w-52">Category</th>
-                    <th className="text-right py-3 px-4 font-medium text-muted-foreground bg-muted/50 w-36">Amount (AUD)</th>
-                    <th className="text-left py-3 px-4 font-medium text-muted-foreground bg-muted/50 w-24">Status</th>
+                    {(
+                      [
+                        { label: 'Date',        key: 'date'          as SortKey, align: 'left',  width: 'w-32' },
+                        { label: 'Description', key: 'description'   as SortKey, align: 'left',  width: ''     },
+                        { label: 'Category',    key: 'category_name' as SortKey, align: 'left',  width: 'w-52' },
+                        { label: 'Amount (AUD)',key: 'amount_aud'    as SortKey, align: 'right', width: 'w-36' },
+                        { label: 'Status',      key: 'review_status' as SortKey, align: 'left',  width: 'w-24' },
+                      ] as const
+                    ).map(({ label, key, align, width }) => {
+                      const active = sortBy === key;
+                      const indicator = active ? (sortDir === 'asc' ? ' ↑' : ' ↓') : '';
+                      return (
+                        <th
+                          key={key}
+                          onClick={() => handleSort(key)}
+                          className={`py-3 px-4 font-medium text-muted-foreground bg-muted/50 ${width} cursor-pointer select-none hover:text-foreground transition-colors ${align === 'right' ? 'text-right' : 'text-left'} ${active ? 'text-foreground' : ''}`}
+                        >
+                          {label}{indicator}
+                        </th>
+                      );
+                    })}
                     <th className="py-3 px-4 bg-muted/50 w-32">{/* actions */}</th>
                   </tr>
                 </thead>
