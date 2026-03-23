@@ -246,6 +246,7 @@ export default function Dashboard() {
       if (chartRef.current && !chartRef.current.contains(e.target as Node)) {
         setClickedBarMonth(null);
         setBarMonthCats(null);
+        setSelectedCatId(null);
       }
     };
     document.addEventListener('mousedown', handler);
@@ -463,8 +464,10 @@ export default function Dashboard() {
             </div>
           </div>
 
+          {/* Interactive area: clicking outside this wrapper deselects the month */}
+          <div ref={chartRef}>
           {/* Monthly Trend Chart */}
-          <div ref={chartRef} className="bg-card border rounded-lg p-6 mt-6">
+          <div className="bg-card border rounded-lg p-6 mt-6">
             <h2 className="text-lg font-semibold mb-4">Monthly Trend</h2>
             {trendData.length === 0 ? (
               <p className="text-muted-foreground text-sm">No trend data available for the selected range.</p>
@@ -535,8 +538,8 @@ export default function Dashboard() {
             </div>
             <p className="text-xs text-muted-foreground mb-4">
               {clickedBarMonth
-                ? `${formatMonth(clickedBarMonth)} · Click a category to drill down · Click outside chart or bar again to deselect`
-                : `${formatMonth(appliedFrom)} – ${formatMonth(appliedTo)} · Click a bar or category to drill down`}
+                ? `${formatMonth(clickedBarMonth)} · Click a category row or pie slice to see expenses · Click outside to return to full period`
+                : `${formatMonth(appliedFrom)} – ${formatMonth(appliedTo)} · Click a bar to select a month, then a category row or pie slice to drill down`}
               {barMonthLoading && ' · Loading…'}
             </p>
             {displayCategories.length === 0 ? (
@@ -829,6 +832,7 @@ export default function Dashboard() {
               )}
             </div>
           )}
+          </div>{/* end interactive area */}
         </>
       )}
     </div>
