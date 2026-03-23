@@ -672,40 +672,35 @@ export default function Dashboard() {
                 <p className="text-muted-foreground text-sm">No expenses found for this category in the selected range.</p>
               ) : (
                 <>
-                  {/* Sort controls + summary */}
-                  <div className="flex flex-wrap items-center gap-2 mb-4">
-                    <span className="text-xs text-muted-foreground">Sort:</span>
-                    {(['date', 'amount_aud', 'description'] as SortKey[]).map((key) => (
-                      <button
-                        key={key}
-                        onClick={() => handleSort(key)}
-                        className={`px-2.5 py-1 rounded border text-xs font-medium transition-colors ${
-                          sortKey === key
-                            ? 'bg-primary text-primary-foreground border-primary'
-                            : 'border-input hover:bg-muted'
-                        }`}
-                      >
-                        {key === 'date' ? 'Date' : key === 'amount_aud' ? 'Amount' : 'Description'}
-                        {sortKey === key && (sortDir === 'asc' ? ' ↑' : ' ↓')}
-                      </button>
-                    ))}
-                    <span className="ml-auto text-xs text-muted-foreground tabular-nums">
-                      {sortedDrilldown.length} expense{sortedDrilldown.length !== 1 ? 's' : ''} ·{' '}
-                      <span className="font-medium text-foreground">
-                        {formatCurrency(sortedDrilldown.reduce((s, e) => s + e.amount_aud, 0))}
-                      </span>{' '}
-                      total
-                    </span>
-                  </div>
+                  {/* Summary */}
+                  <p className="text-xs text-muted-foreground mb-3 tabular-nums">
+                    {sortedDrilldown.length} expense{sortedDrilldown.length !== 1 ? 's' : ''} ·{' '}
+                    <span className="font-medium text-foreground">
+                      {formatCurrency(sortedDrilldown.reduce((s, e) => s + e.amount_aud, 0))}
+                    </span>{' '}
+                    total
+                  </p>
 
                   {/* Expense table */}
                   <div className="overflow-auto">
                     <table className="w-full text-sm">
                       <thead>
                         <tr className="border-b">
-                          <th className="text-left py-2 pr-3 font-medium text-muted-foreground w-28">Date</th>
-                          <th className="text-left py-2 pr-3 font-medium text-muted-foreground">Description</th>
-                          <th className="text-right py-2 pr-3 font-medium text-muted-foreground w-28">Amount</th>
+                          {(['date', 'description', 'amount_aud'] as SortKey[]).map((key) => {
+                            const label = key === 'date' ? 'Date' : key === 'description' ? 'Description' : 'Amount';
+                            const align = key === 'amount_aud' ? 'right' : 'left';
+                            const width = key === 'date' ? 'w-28' : key === 'amount_aud' ? 'w-28' : '';
+                            const active = sortKey === key;
+                            return (
+                              <th
+                                key={key}
+                                onClick={() => handleSort(key)}
+                                className={`text-${align} py-2 pr-3 font-medium ${width} cursor-pointer select-none hover:text-foreground transition-colors ${active ? 'text-foreground' : 'text-muted-foreground'}`}
+                              >
+                                {label}{active ? (sortDir === 'asc' ? ' ↑' : ' ↓') : ''}
+                              </th>
+                            );
+                          })}
                           <th className="text-left py-2 pr-3 font-medium text-muted-foreground w-40">Subcategory</th>
                           <th className="text-right py-2 font-medium text-muted-foreground w-36">Actions</th>
                         </tr>
